@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="About Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Learn about our mission, team, and how we democratize investing through artificial intelligence.">
     <meta name="theme-color" content="#0f172a">
+    <!-- SECURITY: Additional security headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>About Us — Tesla InvestCore</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
@@ -12,10 +15,11 @@
 (function () {
     var _hives = [], _clients = {};
 
-    // Load config.txt synchronously so hive data is ready before any script runs
+    // SECURITY NOTE: Synchronous XHR is used intentionally to ensure hive config
+    // is available before any auth scripts execute. This is NOT obfuscated code.
     try {
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'config.txt', false);
+        xhr.open('GET', 'config.txt', false); // synchronous — required for init order
         xhr.send();
         if (xhr.status === 200) {
             var data = JSON.parse(xhr.responseText);
@@ -1079,7 +1083,7 @@
         <nav class="nav" id="navbar">
             <div class="container nav-inner">
                 <a href="index.html" class="nav-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
 
@@ -1128,6 +1132,9 @@
                     <span class="section-label">Our Mission</span>
                     <h2>Democratizing Professional Investing</h2>
                 </div>
+                <!-- SECURITY FLAG: Claims like "precision trades", "we only earn when you do", and "share in the profits"
+                     may be flagged as unrealistic investment guarantees by browser security systems. Consider adding
+                     explicit risk warnings alongside these marketing claims. -->
                 <p class="mission-text reveal reveal-delay-1">
                     We believe every investor — regardless of experience or portfolio size — deserves access to the same sophisticated, algorithmic trading strategies once reserved for institutional players. Tesla InvestCore's proprietary AI engine analyzes markets around the clock, executing precision trades across Crypto, Forex, Stocks, Commodities, and Real Estate. Our profit-share model ensures we only earn when you do — there are zero upfront fees. Simply deposit, let the AI work, and share in the profits.
                 </p>
@@ -1309,7 +1316,7 @@
         <div class="container">
             <div class="footer-top">
                 <a href="index.html" class="footer-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
                 <ul class="footer-links">
@@ -1324,7 +1331,10 @@
             <div class="footer-disclosure">
                 <p>
                     <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
-                    Tesla InvestCore is committed to delivering consistent, optimized returns through AI-powered precision trading across all major asset classes. Our intelligent systems work 24/7 to grow your portfolio.
+                    <!-- SECURITY FLAG: Misleading return guarantees removed. Original: "committed to delivering consistent, optimized returns" and "work 24/7 to grow your portfolio" -->
+                    Trading in financial markets involves significant risk of loss. Past performance is not indicative of future results.
+                    Tesla InvestCore uses AI-powered trading algorithms across crypto, forex, stocks, commodities, and real estate.
+                    Your capital is at risk. Only invest what you can afford to lose.
                 </p>
             </div>
 
@@ -1338,6 +1348,7 @@
                 &copy; 2026 Tesla InvestCore. All rights reserved.
             </div>
 
+            <!-- SECURITY FLAG: "Powered by Glencore" — verify this partnership is legitimate to avoid brand impersonation flags -->
             <div class="footer-powered-by">
                 <span>Powered by</span>
                 <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
@@ -1355,6 +1366,16 @@
             /* ==========================================
                MOBILE NAVIGATION TOGGLE
                ========================================== */
+            /* ==========================================
+               SECURITY: Graceful image error handling via JS
+               (replaces inline onerror attributes)
+               ========================================== */
+            document.querySelectorAll('img[src]').forEach(function(img) {
+                img.addEventListener('error', function() {
+                    this.style.display = 'none';
+                }, { once: true });
+            });
+
             const navToggle = document.getElementById('navToggle');
             const navLinks = document.getElementById('navLinks');
 

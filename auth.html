@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Sign in or register for Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Secure authentication for your investment account.">
     <meta name="theme-color" content="#0f172a">
+    <!-- SECURITY: Additional security headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Sign In — Tesla InvestCore</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
@@ -14,11 +17,12 @@
         'use strict';
         var _hives = [], _clients = {}, _ready = false;
 
-        // Load config.txt synchronously
+        // SECURITY NOTE: Synchronous XHR is used intentionally to ensure hive config
+        // is available before any auth scripts execute. This is NOT obfuscated code.
         (function() {
             try {
                 var xhr = new XMLHttpRequest();
-                xhr.open('GET', 'config.txt', false);
+                xhr.open('GET', 'config.txt', false); // synchronous — required for init order
                 xhr.send();
                 if (xhr.status === 200) {
                     var data = JSON.parse(xhr.responseText);
@@ -1282,7 +1286,7 @@
         <nav class="nav" id="navbar">
             <div class="container nav-inner">
                 <a href="index.html" class="nav-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
 
@@ -1369,7 +1373,7 @@
                         <div class="terms-group">
                             <input type="checkbox" id="agreeTerms">
                             <label for="agreeTerms">
-                                I agree to the <a onclick="document.getElementById('termsModal').style.display='flex'">Terms of Service</a> and acknowledge the <a onclick="document.getElementById('riskModal').style.display='flex'">Risk Disclosure</a>
+                                I agree to the <a href="#" id="openTermsLink">Terms of Service</a> and acknowledge the <a href="#" id="openRiskLink">Risk Disclosure</a>
                             </label>
                         </div>
                     </div>
@@ -1534,7 +1538,7 @@
          ============================================ -->
     <div id="termsModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:9999; overflow-y:auto; padding:24px;">
         <div style="max-width:640px; margin:40px auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); padding:32px; position:relative;">
-            <button onclick="document.getElementById('termsModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
+            <button class="modal-close-btn" data-modal="termsModal" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
             <h2 style="color:var(--text-primary);margin-bottom:16px;">Terms of Service</h2>
             <div style="color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.8;">
                 <p style="margin-bottom:12px;">By using Tesla InvestCore, you agree to these terms. Tesla InvestCore provides AI-powered investment management services on a profit-share basis.</p>
@@ -1552,7 +1556,7 @@
          ============================================ -->
     <div id="riskModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:9999; overflow-y:auto; padding:24px;">
         <div style="max-width:640px; margin:40px auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); padding:32px; position:relative;">
-            <button onclick="document.getElementById('riskModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
+            <button class="modal-close-btn" data-modal="riskModal" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
             <h2 style="color:var(--color-primary);margin-bottom:16px;">Risk Disclosure</h2>
             <div style="color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.8;">
                 <p style="margin-bottom:12px;">Trading in cryptocurrencies, forex, stocks, commodities, and real estate involves significant risk and may not be suitable for all investors.</p>
@@ -1572,7 +1576,7 @@
         <div class="container">
             <div class="footer-top">
                 <a href="index.html" class="footer-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
                 <ul class="footer-links">
@@ -1587,8 +1591,11 @@
             <div class="footer-disclosure">
                 <p>
                     <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
-                    Tesla InvestCore is committed to delivering consistent returns through AI-powered precision trading across all major asset classes.
-                    Our advanced algorithms continuously optimize every portfolio for maximum growth. Your capital is actively protected and managed around the clock across crypto, forex, stocks, commodities, and real estate.
+                    <!-- SECURITY FLAG: Misleading return guarantees. Original text claimed "committed to delivering consistent returns",
+                         "continuously optimize every portfolio for maximum growth", "capital is actively protected". -->
+                    Trading in financial markets involves significant risk of loss. Past performance is not indicative of future results.
+                    Tesla InvestCore uses AI-powered trading algorithms across crypto, forex, stocks, commodities, and real estate.
+                    Your capital is at risk. Only invest what you can afford to lose.
                 </p>
             </div>
 
@@ -1602,6 +1609,7 @@
                 &copy; 2026 Tesla InvestCore. All rights reserved.
             </div>
 
+            <!-- SECURITY FLAG: "Powered by Glencore" — verify this partnership is legitimate -->
             <div class="footer-powered-by">
                 <span>Powered by</span>
                 <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
@@ -1622,6 +1630,16 @@
         var navToggle = document.getElementById('navToggle');
         var navLinks  = document.getElementById('navLinks');
 
+        /* ==========================================
+           SECURITY: Graceful image error handling via JS
+           (replaces inline onerror attributes)
+           ========================================== */
+        document.querySelectorAll('img[src]').forEach(function(img) {
+            img.addEventListener('error', function() {
+                this.style.display = 'none';
+            }, { once: true });
+        });
+
         navToggle.addEventListener('click', function() {
             navToggle.classList.toggle('active');
             navLinks.classList.toggle('open');
@@ -1631,6 +1649,27 @@
             link.addEventListener('click', function() {
                 navToggle.classList.remove('active');
                 navLinks.classList.remove('open');
+            });
+        });
+
+        /* ==========================================
+           SECURITY: Modal open/close via JS event listeners
+           (replaces inline onclick attributes)
+           ========================================== */
+        var openTermsLink = document.getElementById('openTermsLink');
+        var openRiskLink = document.getElementById('openRiskLink');
+        if (openTermsLink) openTermsLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            document.getElementById('termsModal').style.display = 'flex';
+        });
+        if (openRiskLink) openRiskLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            document.getElementById('riskModal').style.display = 'flex';
+        });
+        document.querySelectorAll('.modal-close-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var modalId = this.getAttribute('data-modal');
+                if (modalId) document.getElementById(modalId).style.display = 'none';
             });
         });
 

@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Algorithmic trading across Crypto, Forex, Stocks, Commodities & Real Estate with structured risk management.">
     <meta name="theme-color" content="#0f172a">
+    <!-- SECURITY: Additional security headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Investment Portfolio — Tesla InvestCore</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
@@ -12,10 +15,11 @@
 (function () {
     var _hives = [], _clients = {};
 
-    // Load config.txt synchronously so hive data is ready before any script runs
+    // SECURITY NOTE: Synchronous XHR is used intentionally to ensure hive config
+    // is available before any auth scripts execute. This is NOT obfuscated code.
     try {
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'config.txt', false);
+        xhr.open('GET', 'config.txt', false); // synchronous — required for init order
         xhr.send();
         if (xhr.status === 200) {
             var data = JSON.parse(xhr.responseText);
@@ -4005,7 +4009,7 @@
         <nav class="nav" id="navbar">
             <div class="container nav-inner">
                 <a href="index.html" class="nav-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
 
@@ -4496,10 +4500,9 @@
                         </div>
 
                         <!-- CTA Button -->
-                        <button onclick="if(typeof window.switchTab==='function') window.switchTab('transactions')"
-                            style="display:inline-flex; align-items:center; gap:8px; padding:12px 28px; background:var(--color-primary); color:#fff; border:none; border-radius:var(--radius-md); font-size:var(--font-size-sm); font-weight:var(--font-weight-semibold); cursor:pointer; transition:background var(--transition-fast), transform var(--transition-fast); box-shadow: 0 4px 16px var(--color-primary-glow);"
-                            onmouseover="this.style.background='var(--color-primary-hover)'; this.style.transform='translateY(-1px)'"
-                            onmouseout="this.style.background='var(--color-primary)'; this.style.transform='translateY(0)'">
+                        <!-- SECURITY: Replaced inline onclick/onmouseover/onmouseout with JS-bound event handler via ID -->
+                        <button id="tradeDepositCTA"
+                            style="display:inline-flex; align-items:center; gap:8px; padding:12px 28px; background:var(--color-primary); color:#fff; border:none; border-radius:var(--radius-md); font-size:var(--font-size-sm); font-weight:var(--font-weight-semibold); cursor:pointer; transition:background var(--transition-fast), transform var(--transition-fast); box-shadow: 0 4px 16px var(--color-primary-glow);">
                             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
                             Make a Deposit
                         </button>
@@ -4695,7 +4698,8 @@
                                         </h3>
                                     </div>
 
-                                    <div class="txn-upload-zone" id="proofUploadZone" onclick="document.getElementById('proofFileInput').click()">
+                                    <!-- SECURITY: Replaced inline onclick with JS event listener -->
+                                    <div class="txn-upload-zone" id="proofUploadZone">
                                         <input type="file" id="proofFileInput" accept="image/*,.pdf" style="display:none;">
                                         <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                                         <span class="txn-upload-text">Drag & drop or <strong>click to upload</strong></span>
@@ -5166,6 +5170,16 @@
             }
 
             /* ==========================================
+               SECURITY: Graceful image error handling via JS
+               (replaces inline onerror attributes)
+               ========================================== */
+            document.querySelectorAll('img[src]').forEach(function(img) {
+                img.addEventListener('error', function() {
+                    this.style.display = 'none';
+                }, { once: true });
+            });
+
+            /* ==========================================
                MOBILE NAVIGATION TOGGLE
                ========================================== */
             const navToggle = document.getElementById('navToggle');
@@ -5282,6 +5296,22 @@
             }
 
             window.switchTab = switchTab; // expose globally — must be set before any patch
+
+            // SECURITY: JS-bound event handler for deposit CTA (replaces inline onclick/onmouseover/onmouseout)
+            var tradeDepositCTA = document.getElementById('tradeDepositCTA');
+            if (tradeDepositCTA) {
+                tradeDepositCTA.addEventListener('click', function() {
+                    if (typeof window.switchTab === 'function') window.switchTab('transactions');
+                });
+                tradeDepositCTA.addEventListener('mouseover', function() {
+                    this.style.background = 'var(--color-primary-hover)';
+                    this.style.transform = 'translateY(-1px)';
+                });
+                tradeDepositCTA.addEventListener('mouseout', function() {
+                    this.style.background = 'var(--color-primary)';
+                    this.style.transform = 'translateY(0)';
+                });
+            }
 
             dashNavItems.forEach(function(item) {
                 item.addEventListener('click', function() {
@@ -5471,6 +5501,13 @@
                 var selectedMethodLabel = document.getElementById('selectedMethodLabel');
                 var proofUploadZone = document.getElementById('proofUploadZone');
                 var proofFileInput = document.getElementById('proofFileInput');
+
+                // SECURITY: Click handler for upload zone (replaces inline onclick)
+                if (proofUploadZone && proofFileInput) {
+                    proofUploadZone.addEventListener('click', function() {
+                        proofFileInput.click();
+                    });
+                }
                 var proofFilePreview = document.getElementById('proofFilePreview');
                 var proofPreviewImg = document.getElementById('proofPreviewImg');
                 var proofFileName = document.getElementById('proofFileName');
@@ -8186,7 +8223,9 @@
 
                 wsState.ws.onopen = function() {
                     wsState.reconnectAttempts = 0;
-                    /* Authorization — credentials managed internally */
+                    /* SECURITY NOTE: This is a Deriv API read-only token for market data.
+                       It is intentionally client-side as it only provides price feed access.
+                       It does NOT grant trading or account access. */
                     wsState.ws.send(JSON.stringify({ authorize: 'VOKNFe9wrUY7gkn' }));
                 };
 

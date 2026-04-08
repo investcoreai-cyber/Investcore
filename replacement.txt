@@ -1,0 +1,397 @@
+<style>
+    /* V3 Transaction Styles - Isolated to prevent conflicts */
+    .v3-txn-wrapper {
+        max-width: 680px;
+        margin: 0 auto;
+        padding-bottom: 40px;
+        font-family: var(--font-family);
+    }
+    
+    /* Modern Segmented Control */
+    .v3-seg-control {
+        display: flex;
+        background: var(--bg-tertiary);
+        padding: 6px;
+        border-radius: 16px;
+        border: 1px solid var(--border-color);
+        margin-bottom: 32px;
+    }
+    .v3-seg-btn {
+        flex: 1;
+        padding: 12px 16px;
+        background: transparent;
+        border: none;
+        border-radius: 12px;
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+    }
+    .v3-seg-btn svg { width: 18px; height: 18px; opacity: 0.6; }
+    .v3-seg-btn.active {
+        background: var(--bg-card);
+        color: var(--text-primary);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    .v3-seg-btn.active svg { opacity: 1; stroke: var(--color-tab-active); }
+
+    /* Premium Cards */
+    .v3-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 20px;
+        padding: 24px;
+        margin-bottom: 24px;
+        box-shadow: var(--shadow-sm);
+    }
+    .v3-card-header {
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--text-primary);
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    
+    /* Balance Display */
+    .v3-balance-box {
+        text-align: center;
+        padding: 32px 20px;
+        background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-tertiary) 100%);
+        position: relative;
+        overflow: hidden;
+    }
+    .v3-balance-box::before {
+        content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px;
+        background: linear-gradient(90deg, var(--color-tab-active), #8b5cf6, var(--color-tab-active));
+    }
+    .v3-balance-label { font-size: 13px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; margin-bottom: 8px; }
+    .v3-balance-amount { font-size: 42px; font-weight: 800; color: var(--text-primary); letter-spacing: -1px; }
+
+    /* Inputs & Selectors */
+    .v3-input-group { margin-bottom: 20px; }
+    .v3-label { display: block; font-size: 13px; color: var(--text-secondary); font-weight: 600; margin-bottom: 8px; }
+    .v3-input-wrapper { position: relative; }
+    .v3-input-wrapper .prefix { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); font-size: 20px; color: var(--text-muted); font-weight: 700; }
+    .v3-input {
+        width: 100%; padding: 16px 16px 16px 40px; background: var(--bg-tertiary);
+        border: 2px solid var(--border-color); border-radius: 14px;
+        font-size: 24px; font-weight: 700; color: var(--text-primary); transition: all 0.2s;
+    }
+    .v3-input:focus { border-color: var(--color-tab-active); outline: none; background: var(--bg-card); box-shadow: 0 0 0 4px var(--color-tab-active-glow); }
+    
+    /* Grid Selectors (Crypto) */
+    .v3-grid-select { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .v3-grid-option {
+        background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 16px;
+        padding: 16px 12px; text-align: center; cursor: pointer; transition: all 0.2s;
+    }
+    .v3-grid-option:hover { border-color: var(--border-color-hover); background: var(--bg-card); }
+    .v3-grid-option.selected { border-color: var(--color-tab-active); background: var(--color-tab-active-glow); }
+    .v3-grid-icon { width: 40px; height: 40px; margin: 0 auto 10px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--bg-card); }
+    .v3-grid-name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+
+    /* Action Buttons */
+    .v3-btn-primary {
+        width: 100%; padding: 18px; background: var(--color-tab-active); color: #fff;
+        border: none; border-radius: 14px; font-size: 16px; font-weight: 700;
+        cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 10px;
+    }
+    .v3-btn-primary:hover { background: #2563eb; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(59,130,246,0.3); }
+    .v3-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+    /* QR Code Box */
+    .v3-qr-box { display: flex; align-items: center; gap: 24px; background: var(--bg-tertiary); padding: 20px; border-radius: 16px; border: 1px solid var(--border-color); }
+    .v3-qr-target { background: #fff; padding: 10px; border-radius: 12px; }
+    .v3-copy-address {
+        word-break: break-all; font-family: monospace; color: var(--color-tab-active); background: var(--bg-card); padding: 12px; border-radius: 8px; border: 1px dashed var(--border-color-hover); margin-bottom: 12px;
+    }
+
+    /* History Table V3 */
+    .v3-history-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+    .v3-history-table th { text-align: left; padding: 16px; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border-color); }
+    .v3-history-table td { padding: 16px; font-size: 14px; border-bottom: 1px solid rgba(255,255,255,0.02); vertical-align: middle; }
+    .v3-history-table tr:hover td { background: rgba(255,255,255,0.02); }
+    .v3-status-pill { display: inline-block; padding: 6px 12px; border-radius: 100px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .v3-status-approved { background: rgba(34,197,94,0.1); color: #4ade80; border: 1px solid rgba(34,197,94,0.2); }
+    .v3-status-pending { background: rgba(245,158,11,0.1); color: #fbbf24; border: 1px solid rgba(245,158,11,0.2); }
+    .v3-status-rejected { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+
+    /* File Upload Zone */
+    .v3-upload-zone { border: 2px dashed var(--border-color); border-radius: 16px; padding: 40px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg-tertiary); position: relative; }
+    .v3-upload-zone:hover { border-color: var(--color-tab-active); background: var(--color-tab-active-glow); }
+    .v3-upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+    /* KYC Lock State */
+    .v3-locked-state { text-align: center; padding: 60px 20px; }
+    .v3-lock-icon { width: 80px; height: 80px; background: rgba(245,158,11,0.1); color: #f59e0b; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 24px; border: 2px solid rgba(245,158,11,0.2); }
+</style>
+
+<section class="dash-tab" id="tab-transactions">
+    <div class="v3-txn-wrapper">
+        <div class="tab-header" style="border:none; background:transparent; padding: 0 0 24px 0;">
+            <h2 style="font-size: 28px;">Transactions</h2>
+        </div>
+
+        <div class="v3-seg-control" id="txnSubTabs">
+            <button class="v3-seg-btn active" data-txn-tab="deposit">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12l10-10 10 10"/></svg> Deposit
+            </button>
+            <button class="v3-seg-btn" data-txn-tab="withdraw">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22V2M2 12l10 10 10-10"/></svg> Withdraw
+            </button>
+            <button class="v3-seg-btn" data-txn-tab="history">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> History
+            </button>
+        </div>
+
+        <div class="txn-sub-panel active" id="txnPanel-deposit">
+            
+            <div class="v3-card v3-balance-box">
+                <div class="v3-balance-label">Current Balance</div>
+                <div class="v3-balance-amount" id="depositBalanceDisplay">$0.00</div>
+            </div>
+
+            <div class="error-banner" id="depositKycVerifiedBanner" style="background: rgba(34,197,94,0.1); border-color: rgba(34,197,94,0.2); color: #4ade80; border-radius: 12px; margin-bottom: 24px; display: none;">
+                <svg viewBox="0 0 24 24" stroke="#4ade80"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                <span>✓ Identity Verified — No deposit limits</span>
+            </div>
+
+            <div class="v3-card">
+                <div class="v3-card-header">Deposit Details</div>
+                
+                <div class="v3-input-group">
+                    <label class="v3-label">Amount</label>
+                    <div class="v3-input-wrapper">
+                        <span class="prefix">$</span>
+                        <input type="number" id="depositAmount" class="v3-input" placeholder="0.00" min="100">
+                    </div>
+                </div>
+
+                <div class="v3-input-group">
+                    <label class="v3-label">Select Network</label>
+                    <div class="v3-grid-select">
+                        <div class="v3-grid-option fund-method-row" data-method="usdt">
+                            <div class="v3-grid-icon" style="color: #26a69a;">₮</div>
+                            <div class="v3-grid-name">USDT (TRC20)</div>
+                            <button class="fund-select-btn" data-method="usdt" style="display:none;">Select</button>
+                        </div>
+                        <div class="v3-grid-option fund-method-row" data-method="eth">
+                            <div class="v3-grid-icon" style="color: #627eea;">Ξ</div>
+                            <div class="v3-grid-name">Ethereum</div>
+                            <button class="fund-select-btn" data-method="eth" style="display:none;">Select</button>
+                        </div>
+                        <div class="v3-grid-option fund-method-row" data-method="btc">
+                            <div class="v3-grid-icon" style="color: #f7931a;">₿</div>
+                            <div class="v3-grid-name">Bitcoin</div>
+                            <button class="fund-select-btn" data-method="btc" style="display:none;">Select</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="v3-card" id="paymentDetailsCard" style="display:none;">
+                <div class="v3-card-header">Payment Address</div>
+                
+                <div class="v3-qr-box">
+                    <div class="v3-qr-target" id="depositQrTarget"></div>
+                    <div style="flex:1;">
+                        <div class="v3-label">Send <span id="selectedMethodLabel"></span> to:</div>
+                        <div class="v3-copy-address" id="cryptoAddress">...</div>
+                        <button id="copyAddressBtn" class="v3-seg-btn" style="background: var(--bg-card); width: auto;">Copy Address</button>
+                    </div>
+                </div>
+                
+                <p id="qrCodeLabel" style="display:none;"></p>
+                <span id="cryptoNetworkLabel" style="display:none;"></span>
+
+                <div style="margin-top: 32px;">
+                    <div class="v3-label">Upload Proof of Payment</div>
+                    <div class="v3-upload-zone" id="proofUploadZone">
+                        <input type="file" id="proofFileInput" accept="image/*,.pdf">
+                        <svg viewBox="0 0 24 24" width="40" height="40" stroke="var(--text-muted)" fill="none" stroke-width="2" style="margin-bottom:12px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <div style="font-weight: 600; color: var(--text-primary);">Click or drag file to upload</div>
+                        <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">JPG, PNG, PDF (Max 10MB)</div>
+                    </div>
+
+                    <div id="proofFilePreview" style="display:none; margin-top:16px; background:var(--bg-tertiary); padding:16px; border-radius:12px; align-items:center; gap:16px;">
+                        <img id="proofPreviewImg" src="" style="width:60px; height:60px; border-radius:8px; object-fit:cover;">
+                        <div style="flex:1;">
+                            <div id="proofFileName" style="font-weight:600; font-size:14px;"></div>
+                            <div id="proofFileSize" style="color:var(--text-muted); font-size:12px;"></div>
+                        </div>
+                        <button id="proofFileRemove" style="background:transparent; color:var(--color-primary); border:none; cursor:pointer;">✕</button>
+                    </div>
+                </div>
+            </div>
+
+            <button class="v3-btn-primary" id="depositSubmitBtn">Process Deposit</button>
+            
+            <span id="totalDeposited" style="display:none;"></span>
+            <span id="pendingDeposits" style="display:none;"></span>
+        </div>
+
+        <div class="txn-sub-panel" id="txnPanel-withdraw">
+            
+            <div id="withdrawLockedState" class="v3-card v3-locked-state">
+                <div class="v3-lock-icon">
+                    <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                </div>
+                <h3 style="font-size: 24px; margin-bottom: 12px;">Verification Required</h3>
+                <p style="color: var(--text-secondary); line-height: 1.6; margin-bottom: 32px;">Complete a quick identity verification to unlock secure withdrawals.</p>
+                
+                <div id="withdrawLockSteps" style="display:none;">
+                    <div id="wStep1"></div><div id="wStep2"></div><div id="wStep3"></div>
+                </div>
+
+                <div id="withdrawPendingBanner" style="display:none; color: #fbbf24; background: rgba(245,158,11,0.1); padding: 16px; border-radius: 12px; margin-bottom: 24px;">
+                    Verification under review. (1-3 business days)
+                </div>
+
+                <button class="v3-btn-primary" id="withdrawVerifyBtn">Start KYC Verification</button>
+            </div>
+
+            <div id="withdrawKycForm" style="display:none;">
+                <div class="v3-card">
+                    <button id="kycBackBtn" style="background:transparent; border:none; color:var(--text-muted); cursor:pointer; margin-bottom:20px; font-weight:600;">← Back</button>
+                    
+                    <div id="kycStatusCard" style="display:none;"><div id="kycStatusIcon"></div><div id="kycStatusTitle"></div><div id="kycStatusDesc"></div><div id="kycBadge"></div></div>
+
+                    <div id="kycUploadForm">
+                        <div class="v3-input-group">
+                            <label class="v3-label">Document Type</label>
+                            
+                            <div class="custom-dropdown kyc-doc-dropdown" id="kycDocDropdown">
+                                <div class="v3-input" id="kycDocTrigger" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;">
+                                    <span id="kycDocText">Select ID Type...</span>
+                                    <span class="dd-arrow"></span>
+                                </div>
+                                <div class="custom-dropdown-panel" id="kycDocPanel">
+                                    <ul class="custom-dropdown-list" id="kycDocList">
+                                        <li class="custom-dropdown-item" data-value="passport">International Passport</li>
+                                        <li class="custom-dropdown-item" data-value="national_id">National ID Card</li>
+                                        <li class="custom-dropdown-item" data-value="drivers_license">Driver's License</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            <input type="hidden" id="kycDocType">
+                        </div>
+
+                        <div id="kycDynamicUploads">
+                            <label class="v3-label" id="kycUploadMainLabel" style="margin-top: 24px;">Upload Document</label>
+                            <div id="kycUploadGroupsContainer" class="kyc-upload-groups" style="display:none;"></div>
+                            <div id="kycNoTypeSelected" class="v3-upload-zone" style="padding: 20px; color: var(--text-muted);">Please select a document type first.</div>
+                        </div>
+
+                        <button class="v3-btn-primary" id="kycSubmitBtn" style="margin-top: 32px;" disabled>Submit Verification</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="withdrawFormSection" style="display:none;">
+                <div class="v3-card v3-balance-box">
+                    <div class="v3-balance-label">Available for Withdrawal</div>
+                    <div class="v3-balance-amount" id="withdrawBalance">$0.00</div>
+                    
+                    <div id="withdrawBreakdown" style="margin-top: 16px; font-size: 13px; color: var(--text-muted); display:flex; justify-content:center; gap:16px;">
+                        <span>P&L: <span id="withdrawPnl" style="color:var(--color-positive); font-weight:700;">$0.00</span></span>
+                        <span>Fee (20%): <span id="withdrawFeeDeduction" style="color:var(--color-negative); font-weight:700;">$0.00</span></span>
+                    </div>
+                </div>
+
+                <div class="v3-card">
+                    <div class="v3-card-header">Withdrawal Details</div>
+                    
+                    <div class="v3-input-group">
+                        <label class="v3-label">Amount</label>
+                        <div class="v3-input-wrapper">
+                            <span class="prefix">$</span>
+                            <input type="number" id="withdrawAmount" class="v3-input" placeholder="0.00" min="50">
+                        </div>
+                    </div>
+
+                    <div class="v3-input-group">
+                        <label class="v3-label">Withdrawal Method</label>
+                        <div class="v3-grid-select">
+                            <div class="v3-grid-option withdraw-method-row" data-wmethod="usdt">
+                                <div class="v3-grid-icon" style="color: #26a69a;">₮</div>
+                                <div class="v3-grid-name">USDT (TRC20)</div>
+                                <button class="withdraw-select-btn" data-wmethod="usdt" style="display:none;">Select</button>
+                            </div>
+                            <div class="v3-grid-option withdraw-method-row" data-wmethod="eth">
+                                <div class="v3-grid-icon" style="color: #627eea;">Ξ</div>
+                                <div class="v3-grid-name">Ethereum</div>
+                                <button class="withdraw-select-btn" data-wmethod="eth" style="display:none;">Select</button>
+                            </div>
+                            <div class="v3-grid-option withdraw-method-row" data-wmethod="btc">
+                                <div class="v3-grid-icon" style="color: #f7931a;">₿</div>
+                                <div class="v3-grid-name">Bitcoin</div>
+                                <button class="withdraw-select-btn" data-wmethod="btc" style="display:none;">Select</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="v3-input-group" id="withdrawAddressSection" style="display:none;">
+                        <label class="v3-label">Destination Address (<span id="withdrawMethodName"></span>)</label>
+                        <input type="text" id="withdrawAddress" class="v3-input" style="padding-left:16px; font-size:16px; font-family:monospace;" placeholder="Paste wallet address...">
+                    </div>
+
+                    <div id="withdrawFeeInfo" style="display:none; margin-bottom: 24px; padding: 16px; background: var(--bg-tertiary); border-radius: 12px; display:flex; justify-content:space-between; font-size:13px;">
+                        <span style="color:var(--text-muted);">Network Fee</span>
+                        <span id="withdrawFeeValue" style="font-weight:700;"></span>
+                    </div>
+
+                    <button class="v3-btn-primary" id="withdrawSubmitBtn" disabled>Submit Request</button>
+                </div>
+            </div>
+
+        </div>
+
+        <div class="txn-sub-panel" id="txnPanel-history">
+            
+            <div class="v3-seg-control" id="txnHistoryToggle" style="margin-bottom: 24px;">
+                <button class="v3-seg-btn active txn-type-btn" data-history-tab="deposits">Deposits</button>
+                <button class="v3-seg-btn txn-type-btn" data-history-tab="withdrawals">Withdrawals</button>
+            </div>
+
+            <div class="txn-history-panel active" id="historyPanel-deposits">
+                
+                <div id="txnDepositSummary" style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom: 24px;">
+                    <div style="background:var(--bg-card); padding:16px; border-radius:12px; border:1px solid var(--border-color);">
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">Total</div>
+                        <div id="txnSumTotal" style="font-size:18px; font-weight:700;">$0.00</div>
+                    </div>
+                    <div style="background:var(--bg-card); padding:16px; border-radius:12px; border:1px solid rgba(34,197,94,0.2);">
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">Approved</div>
+                        <div id="txnSumApproved" style="font-size:18px; font-weight:700; color:#4ade80;">$0.00</div>
+                    </div>
+                    <div style="background:var(--bg-card); padding:16px; border-radius:12px; border:1px solid rgba(245,158,11,0.2);">
+                        <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">Pending</div>
+                        <div id="txnSumPending" style="font-size:18px; font-weight:700; color:#fbbf24;">$0.00</div>
+                    </div>
+                </div>
+
+                <div class="v3-card" style="padding: 0; overflow: hidden;" id="txnDepositHistoryList">
+                    </div>
+            </div>
+
+            <div class="txn-history-panel" id="historyPanel-withdrawals">
+                <div class="v3-card" style="padding: 0; overflow: hidden;" id="txnWithdrawalHistoryList">
+                     <div style="text-align:center; padding:60px 20px;">
+                        <svg viewBox="0 0 24 24" width="40" height="40" stroke="var(--text-muted)" fill="none" stroke-width="1.5" style="margin-bottom:12px;"><path d="M12 22V2M2 12l10 10 10-10"/></svg>
+                        <h4 style="margin:0 0 8px 0; font-size:16px;">No withdrawals yet</h4>
+                        <p style="margin:0; color:var(--text-muted); font-size:14px;">Your history will appear here.</p>
+                     </div>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+</section>

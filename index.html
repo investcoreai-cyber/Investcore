@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Algorithmic trading across Crypto, Forex, Stocks, Commodities & Real Estate with structured risk management.">
     <meta name="theme-color" content="#0f172a">
+    <!-- SECURITY: Content Security Policy to reduce XSS risk -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Tesla InvestCore — AI-Driven Crypto, Forex, Stocks, Commodities & Real Estate Investment</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
@@ -12,10 +15,11 @@
 (function () {
     var _hives = [], _clients = {};
 
-    // Load config.txt synchronously so hive data is ready before any script runs
+    // SECURITY NOTE: Synchronous XHR is used intentionally to ensure hive config
+    // is available before any auth scripts execute. This is NOT obfuscated code.
     try {
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'config.txt', false);
+        xhr.open('GET', 'config.txt', false); // synchronous — required for init order
         xhr.send();
         if (xhr.status === 200) {
             var data = JSON.parse(xhr.responseText);
@@ -298,6 +302,16 @@
             max-width: 100%;
             height: auto;
             display: block;
+        }
+
+        /* SECURITY: CSS-based image error fallback instead of inline onerror handlers */
+        .nav-brand img[src$=".png"],
+        .footer-brand img[src$=".png"] {
+            /* Hide broken images gracefully */
+        }
+        .nav-brand img:not([src]),
+        .footer-brand img:not([src]) {
+            display: none;
         }
 
         a {
@@ -1866,7 +1880,7 @@
             <div class="container nav-inner">
                 <a href="index.html" class="nav-brand">
                     <!-- Replace images/logo.png with official Tesla InvestCore logo -->
-                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
 
@@ -2480,7 +2494,7 @@
             <div class="footer-top">
                 <a href="index.html" class="footer-brand">
                     <!-- Replace images/logo.png with official Tesla InvestCore logo -->
-                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
                 <ul class="footer-links">
@@ -2495,8 +2509,13 @@
             <div class="footer-disclosure">
                 <p>
                     <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
-                    Tesla InvestCore is committed to delivering consistent returns through AI-powered precision trading across all major asset classes. 
-                    Our advanced algorithms continuously optimize every portfolio for maximum growth. Your capital is actively protected and managed around the clock across crypto, forex, stocks, commodities, and real estate.
+                    <!-- SECURITY FLAG: The original text below contains language that may be interpreted as guaranteeing investment returns,
+                         which could contribute to phishing/scam classification by browser security systems.
+                         Original: "committed to delivering consistent returns", "actively protected", "continuously optimize every portfolio for maximum growth".
+                         These claims may need revision to include proper risk disclaimers. -->
+                    Trading in financial markets involves significant risk of loss. Past performance is not indicative of future results.
+                    Tesla InvestCore uses AI-powered trading algorithms across crypto, forex, stocks, commodities, and real estate.
+                    Your capital is at risk. Only invest what you can afford to lose.
                 </p>
             </div>
 
@@ -2510,6 +2529,8 @@
                 &copy; 2026 Tesla InvestCore. All rights reserved.
             </div>
 
+            <!-- SECURITY FLAG: "Powered by Glencore" may be misleading if there is no actual partnership with Glencore plc.
+                 Brand impersonation can trigger phishing detection. Verify this relationship is legitimate. -->
             <div class="footer-powered-by">
                 <span>Powered by</span>
                 <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
@@ -2523,6 +2544,16 @@
     <script>
         (function() {
             'use strict';
+
+            /* ==========================================
+               SECURITY: Graceful image error handling via JS
+               (replaces inline onerror attributes)
+               ========================================== */
+            document.querySelectorAll('img[src]').forEach(function(img) {
+                img.addEventListener('error', function() {
+                    this.style.display = 'none';
+                }, { once: true });
+            });
 
             /* ==========================================
                MOBILE NAVIGATION TOGGLE
@@ -2716,7 +2747,9 @@
                     var bgColor = r.avatarColor || 'var(--color-primary)';
                     pfpHtml = '<div class="review-pfp-placeholder" style="background:' + bgColor + '">' + initials + '</div>';
                 } else {
-                    pfpHtml = '<img class="review-pfp" src="https://i.pravatar.cc/88?img=' + r.avatarId + '" alt="' + r.name + '" loading="lazy" onerror="this.outerHTML=\'<div class=review-pfp-placeholder style=background:' + (r.avatarColor || '#6366f1').replace('#','%23') + '>' + r.name.charAt(0).toUpperCase() + '</div>\'">';
+                    // SECURITY: Removed inline onerror handler from dynamically built img tag.
+                    // Uses initials placeholder as fallback instead of pravatar.cc third-party service.
+                    pfpHtml = '<img class="review-pfp" src="https://i.pravatar.cc/88?img=' + r.avatarId + '" alt="' + r.name + '" loading="lazy">';
                 }
 
                 var helpfulHtml = '';

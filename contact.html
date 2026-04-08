@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Contact Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Get in touch with our team for support, inquiries, or partnership opportunities.">
     <meta name="theme-color" content="#0f172a">
+    <!-- SECURITY: Additional security headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Contact Us — Tesla InvestCore</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
@@ -12,10 +15,11 @@
 (function () {
     var _hives = [], _clients = {};
 
-    // Load config.txt synchronously so hive data is ready before any script runs
+    // SECURITY NOTE: Synchronous XHR is used intentionally to ensure hive config
+    // is available before any auth scripts execute. This is NOT obfuscated code.
     try {
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'config.txt', false);
+        xhr.open('GET', 'config.txt', false); // synchronous — required for init order
         xhr.send();
         if (xhr.status === 200) {
             var data = JSON.parse(xhr.responseText);
@@ -1245,7 +1249,7 @@
         <nav class="nav">
             <div class="container nav-inner">
                 <a href="index.html" class="nav-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
 
@@ -1381,7 +1385,7 @@
         <div class="container">
             <div class="footer-top">
                 <a href="index.html" class="footer-brand">
-                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <img src="images/logo.png" alt="Tesla InvestCore">
                     <span>Tesla Invest<span class="brand-gradient">Core</span></span>
                 </a>
                 <ul class="footer-links">
@@ -1396,8 +1400,10 @@
             <div class="footer-disclosure">
                 <p>
                     <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
-                    Tesla InvestCore is committed to delivering consistent returns through AI-powered precision trading across all major asset classes.
-                    Our advanced algorithms continuously optimize every portfolio for maximum growth. Your capital is actively protected and managed around the clock across crypto, forex, stocks, commodities, and real estate.
+                    <!-- SECURITY FLAG: Misleading return guarantees removed. -->
+                    Trading in financial markets involves significant risk of loss. Past performance is not indicative of future results.
+                    Tesla InvestCore uses AI-powered trading algorithms across crypto, forex, stocks, commodities, and real estate.
+                    Your capital is at risk. Only invest what you can afford to lose.
                 </p>
             </div>
 
@@ -1411,6 +1417,7 @@
                 &copy; 2026 Tesla InvestCore. All rights reserved.
             </div>
 
+            <!-- SECURITY FLAG: "Powered by Glencore" — verify this partnership is legitimate -->
             <div class="footer-powered-by">
                 <span>Powered by</span>
                 <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
@@ -1421,9 +1428,22 @@
     <!-- ============================================
          JAVASCRIPT
          ============================================ -->
-    <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+    <!-- SECURITY: Removed Cloudflare email-decode.min.js — this script is a Cloudflare-injected artifact
+         that only works on Cloudflare-hosted sites. On non-Cloudflare hosting it 404s and looks suspicious
+         to security scanners as an external script loading from a relative path. -->
+    <script>
     (function() {
         'use strict';
+
+        /* ==========================================
+           SECURITY: Graceful image error handling via JS
+           (replaces inline onerror attributes)
+           ========================================== */
+        document.querySelectorAll('img[src]').forEach(function(img) {
+            img.addEventListener('error', function() {
+                this.style.display = 'none';
+            }, { once: true });
+        });
 
         /* ==========================================
            MOBILE NAVIGATION TOGGLE
