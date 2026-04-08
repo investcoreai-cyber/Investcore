@@ -1,0 +1,186 @@
+{
+  "hives": [
+    {
+      "index": 0,
+      "name": "main",
+      "role": "admin",
+      "url": "https://khjqmipquqhnrlhdyjws.supabase.co",
+      "anonKey": "sb_publishable__AydeKHEYpncS0Jgx2PEuw_Mv6DwYEG"
+    },
+    {
+      "index": 1,
+      "name": "hive1",
+      "role": "user",
+      "url": "https://xpqmheftmcjsozykjnxk.supabase.co",
+      "anonKey": "sb_publishable_RzKc1BvadOEifZESXm7fjA_J_r1SjQQ"
+    },
+    {
+      "index": 2,
+      "name": "hive2",
+      "role": "user",
+      "url": "https://sfvreetqicoxxguienjc.supabase.co",
+      "anonKey": "sb_publishable_9rRLLWyBu-d5oyTsHhHBPg_zUH0a1lQ"
+    },
+    {
+      "index": 3,
+      "name": "hive3",
+      "role": "user",
+      "url": "https://wqglrnjpuspzbfhhvhrq.supabase.co",
+      "anonKey": "sb_publishable_acFTLy8hX_plWJGuIeUJ-g_c1vq8CVe"
+    },
+    {
+      "index": 4,
+      "name": "hive4",
+      "role": "user",
+      "url": "https://gmdunwumtucattcetobg.supabase.co",
+      "anonKey": "sb_publishable_EDO3CcjHfyaQhdcXaXGmtQ_VfbEHKdH"
+    },
+    {
+      "index": 5,
+      "name": "hive5",
+      "role": "user",
+      "url": "https://ssrdnlnftlptejubyuip.supabase.co",
+      "anonKey": "sb_publishable_Z43fZ96GU84lwc_H38IiIQ_XPbyuPe8"
+    },
+    {
+      "index": 6,
+      "name": "hive6",
+      "role": "user",
+      "url": "https://eseoroytbxylaxtbmemw.supabase.co",
+      "anonKey": "sb_publishable_JKq8MuqWxZfmup68_zb3Ow_If_RzVun"
+    },
+    {
+      "index": 7,
+      "name": "hive7",
+      "role": "user",
+      "url": "https://gdjuvqeptqukdpwclfvy.supabase.co",
+      "anonKey": "sb_publishable_kGY1tInPjDcYuCsbQKwLhQ_TMTv-wSq"
+    },
+    {
+      "index": 8,
+      "name": "hive8",
+      "role": "user",
+      "url": "https://synbcntexrkejfoxdnks.supabase.co",
+      "anonKey": "sb_publishable_Z3WBiwgOoAyy7swmM3atUw_BVhuhGwZ"
+    },
+    {
+      "index": 9,
+      "name": "hive9",
+      "role": "user",
+      "url": "https://bnxoldofhiqgodnzryms.supabase.co",
+      "anonKey": "sb_publishable_0codsB_D8cRmdNiQ4SJZvg_yDMbr82l"
+    },
+    {
+      "index": 10,
+      "name": "hive10",
+      "role": "user",
+      "url": "https://fyansnjzyszqqfwusago.supabase.co",
+      "anonKey": "sb_publishable_Zd4i96aKLTAoQtvwlJ12YA_xNmB9byT"
+    },
+    {
+      "index": 11,
+      "name": "hive11",
+      "role": "user",
+      "url": "https://nonarnvpbxmndbozpizt.supabase.co",
+      "anonKey": "sb_publishable_IOAZGfsBaTL6xB-zsuvqXQ_iNx2gV2A"
+    },
+    {
+      "index": 12,
+      "name": "hive12",
+      "role": "user",
+      "url": "https://ujtbdbralyxpymaswojt.supabase.co",
+      "anonKey": "sb_publishable_Ej_DeHpuXszTvXfgzyo9Jw_OnB09Goq"
+    },
+    {
+      "index": 13,
+      "name": "hive13",
+      "role": "user",
+      "url": "https://naapiyuvlqupbwyvwrdb.supabase.co",
+      "anonKey": "sb_publishable_T-cYe_cP-3mdhbgj_nczUw_KdP1uNLc"
+    },
+    {
+      "index": 14,
+      "name": "hive14",
+      "role": "user",
+      "url": "https://bvexitaztcweozvzsphd.supabase.co",
+      "anonKey": "sb_publishable_YNb-2LBZEVxB2fSyo0rfGA_IKywdfDc"
+    },
+    {
+      "index": 15,
+      "name": "hive15",
+      "role": "user",
+      "url": "https://igkdcsvscsmkdmmmxetp.supabase.co",
+      "anonKey": "sb_publishable_3i6FW9J9YQkNGs55Q66DWA_afXCuqfG"
+    },
+    {
+      "index": 16,
+      "name": "hive16",
+      "role": "user",
+      "url": "https://jummfembsazjovoxcyhs.supabase.co",
+      "anonKey": "sb_publishable_Ok0DvId2MPFjHIhDr6ZyKw_mav9uv_M"
+    },
+    {
+      "index": 17,
+      "name": "hive17",
+      "role": "user",
+      "url": "https://gdeuxfrqlojctfqyxtwf.supabase.co",
+      "anonKey": "sb_publishable_C730qh0wi9o3MxSYbBpCVA_IBavrCrB"
+    },
+    {
+      "index": 18,
+      "name": "hive18",
+      "role": "user",
+      "url": "https://slzhoqoeuirvfntwrxlx.supabase.co",
+      "anonKey": "sb_publishable_RBEQJ72KmTF2Z2GsWS8_lg_ZOXmBRu3"
+    },
+    {
+      "index": 19,
+      "name": "hive19",
+      "role": "user",
+      "url": "https://mdcetqnmmkkzrwnzkkmq.supabase.co",
+      "anonKey": "sb_publishable_0QgzjGt4UGol0AXoOZiUOA_b9sIwjJK"
+    },
+    {
+      "index": 20,
+      "name": "hive20",
+      "role": "user",
+      "url": "https://bgjkdpdjfqvixpaakjxb.supabase.co",
+      "anonKey": "sb_publishable_7vsya-j5QGT9iSAXwv-TEw_t5zhFgMp"
+    },
+    {
+      "index": 21,
+      "name": "hive21",
+      "role": "user",
+      "url": "https://ewxhzkmejqeylbgmetni.supabase.co",
+      "anonKey": "sb_publishable_39sha4htvC8wSc8Ke6HbXA_MviVn4Po"
+    },
+    {
+      "index": 22,
+      "name": "hive22",
+      "role": "user",
+      "url": "https://suzimcfvjpmaufxpjprh.supabase.co",
+      "anonKey": "sb_publishable_3aJEO6Ezf4U1g5DBtsZsuw_mrpvBIzZ"
+    },
+    {
+      "index": 23,
+      "name": "hive23",
+      "role": "user",
+      "url": "https://ifeenawzpugqlepnkwug.supabase.co",
+      "anonKey": "sb_publishable_cRoydfn5ycg3i5V9zpAP1g_oaLK97bH"
+    },
+    {
+      "index": 24,
+      "name": "hive24",
+      "role": "user",
+      "url": "https://egbyxurmrbuhvicpptqd.supabase.co",
+      "anonKey": "sb_publishable_jws4biJhxKt6xTZ5xprfGw_Ti-Gplhr"
+    },
+    {
+      "index": 25,
+      "name": "hive25",
+      "role": "user",
+      "url": "https://msmxunfixftcboqchvfw.supabase.co",
+      "anonKey": "sb_publishable_CI5EoB_j9twqXPhAQ5hU7A_crM6FQm4"
+    }
+  ]
+}

@@ -1,0 +1,2281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Sign in or register for Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Secure authentication for your investment account.">
+    <meta name="theme-color" content="#0f172a">
+    <title>Sign In — Tesla InvestCore</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <!-- window._IC — self-contained Supabase auth layer (reads config.txt synchronously) -->
+    <script>
+    window._IC = (function() {
+        'use strict';
+        var _hives = [], _clients = {}, _ready = false;
+
+        // Load config.txt synchronously
+        (function() {
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', 'config.txt', false);
+                xhr.send();
+                if (xhr.status === 200) {
+                    var data = JSON.parse(xhr.responseText);
+                    if (data && Array.isArray(data.hives)) { _hives = data.hives; _ready = true; }
+                }
+            } catch(e) { console.error('[IC] config.txt load failed:', e); }
+        })();
+
+        function _client(index) {
+            if (_clients[index]) return _clients[index];
+            var h = _hives[index];
+            if (!h || !h.url || !h.anonKey) throw new Error('No hive config for index ' + index);
+            _clients[index] = window.supabase.createClient(h.url, h.anonKey, {
+                auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: 'investcore-sb-auth-' + index }
+            });
+            return _clients[index];
+        }
+
+        // Hive 0 client — used for global_directory queries (anon key, no auth needed)
+        function _hive0() { return _client(0); }
+
+        function userHives() { return _hives.filter(function(h) { return h.role === 'user'; }); }
+
+        // ── global_directory helpers ─────────────────────────────────
+        // Queries the global_directory on Hive 0 to find which hive an email belongs to.
+        // Returns { email, hive_id } or null if not found.
+        async function lookupDirectory(email) {
+            try {
+                var r = await _hive0().from('global_directory')
+                    .select('email, hive_id')
+                    .eq('email', email.toLowerCase().trim())
+                    .maybeSingle();
+                if (!r.error && r.data) return r.data;
+            } catch(e) { console.warn('[IC] directory lookup failed:', e); }
+            return null;
+        }
+
+        // Inserts email→hiveId mapping into global_directory on Hive 0.
+        async function registerDirectory(email, hiveId) {
+            try {
+                await _hive0().from('global_directory')
+                    .insert({ email: email.toLowerCase().trim(), hive_id: hiveId });
+            } catch(e) { console.warn('[IC] directory insert failed:', e); }
+        }
+
+        // ── Pick the next hive for new signups ─────────────────────
+        // Simple round-robin: picks the user hive with the lowest index.
+        // Can be upgraded to load-balanced assignment later.
+        function pickSignupHive() {
+            var uh = userHives();
+            return uh.length > 0 ? uh[0].index : (_hives.length > 1 ? 1 : 0);
+        }
+
+        function storeAuth(hiveId, userId, email, fullName) {
+            localStorage.setItem('investcore_hiveId',    String(hiveId));
+            localStorage.setItem('investcore_userId',    userId   || '');
+            localStorage.setItem('investcore_userEmail', email    || '');
+            localStorage.setItem('investcore_fullName',  fullName || '');
+        }
+
+        function clearAuth() {
+            ['investcore_hiveId','investcore_userId','investcore_userEmail','investcore_fullName']
+                .forEach(function(k) { localStorage.removeItem(k); });
+        }
+
+        function storedHiveId() {
+            var v = Number(localStorage.getItem('investcore_hiveId'));
+            return Number.isFinite(v) && v >= 0 ? v : null;
+        }
+
+        // ── signUp — uses global_directory to prevent duplicates ──────
+        // 1. Check global_directory on Hive 0 — reject if email exists
+        // 2. Sign up on the designated hive
+        // 3. INSERT into global_directory immediately
+        // NOTE: initBalance is NOT called — the SQL trigger handles it.
+        async function signUp(email, password, metadata) {
+            // Step 1: Check global_directory
+            var existing = await lookupDirectory(email);
+            if (existing) {
+                throw new Error('User already exists. Please sign in instead.');
+            }
+
+            // Step 2: Pick hive and sign up
+            var targetHive = pickSignupHive();
+            var c = _client(targetHive);
+            var r = await c.auth.signUp({ email: email, password: password, options: { data: metadata || {} } });
+
+            if (r.error) {
+                var msg = r.error.message || '';
+                if (/rate.?limit|too many/i.test(msg))
+                    throw new Error('Too many attempts. Please wait a few minutes and try again.');
+                if (/password.*short|password.*weak|at least/i.test(msg))
+                    throw new Error('Password must be at least 8 characters.');
+                throw new Error('Unable to create your account right now. Please try again later.');
+            }
+
+            var user = r.data && r.data.user ? r.data.user : null;
+            var ids = user && Array.isArray(user.identities) ? user.identities : null;
+            if (!user || !user.id || (ids !== null && ids.length === 0)) {
+                try { await c.auth.signOut(); } catch(_) {}
+                throw new Error('User already exists. Please sign in instead.');
+            }
+
+            // Step 3: Register in global_directory
+            await registerDirectory(email, targetHive);
+
+            storeAuth(targetHive, user.id, email, metadata && metadata.full_name ? metadata.full_name : '');
+            return { hiveId: targetHive, client: c, user: user };
+        }
+
+        // ── signIn — looks up global_directory first, then targets ONE hive ──
+        async function signIn(email, password) {
+            // Step 1: Find user's hive from global_directory
+            var dir = await lookupDirectory(email);
+            if (!dir) {
+                throw new Error('Invalid email or password.');
+            }
+
+            // Step 2: Sign in on that specific hive only
+            var idx = dir.hive_id;
+            var c = _client(idx);
+            var r = await c.auth.signInWithPassword({ email: email, password: password });
+            if (r.error) {
+                var msg = r.error.message || '';
+                if (/email not confirmed/i.test(msg)) {
+                    var err = new Error('Your email has not been confirmed yet.');
+                    err.code = 'EMAIL_NOT_CONFIRMED'; throw err;
+                }
+                if (/invalid.*cred|invalid login/i.test(msg))
+                    throw new Error('Invalid email or password.');
+                throw new Error('Unable to sign in right now. Please try again later.');
+            }
+
+            var user = r.data && r.data.user ? r.data.user : null;
+            storeAuth(idx, user ? user.id : '', email,
+                user && user.user_metadata ? user.user_metadata.full_name || '' : '');
+            return { hiveId: idx, client: c, user: user };
+        }
+
+        // ── sendOTP — uses global_directory to find the correct hive ──
+        // Returns hiveId if email exists, null if not found.
+        // If global_directory has no mapping (orphaned user), iterate all user
+        // hives as a fallback and repair the directory entry on success.
+        async function sendOTP(email) {
+            var dir = await lookupDirectory(email);
+            if (dir) {
+                var idx = dir.hive_id;
+                var r = await _client(idx).auth.signInWithOtp({ email: email, options: { shouldCreateUser: false } });
+                if (!r.error) return idx;
+                return null;
+            }
+
+            // ── Orphaned-user fallback: iterate all user hives ─────────
+            var uh = userHives();
+            for (var i = 0; i < uh.length; i++) {
+                var hIdx = uh[i].index;
+                try {
+                    var r2 = await _client(hIdx).auth.signInWithOtp({ email: email, options: { shouldCreateUser: false } });
+                    if (!r2.error) {
+                        // OTP sent successfully — repair global_directory on Hive 0
+                        console.log('[IC] Orphan recovery: OTP succeeded on hive', hIdx, '— repairing directory.');
+                        await registerDirectory(email, hIdx);
+                        return hIdx;
+                    }
+                } catch(e) { /* try next hive */ }
+            }
+            return null;
+        }
+
+        // verifyOTP — uses ONE specific hiveId only. NEVER loops. NEVER creates users.
+        async function verifyOTP(hiveId, email, token) {
+            if (hiveId === null || hiveId === undefined)
+                throw new Error('Session expired. Please go back and start again.');
+            var c = _client(hiveId);
+            var types = ['recovery', 'email', 'signup', 'magiclink'];
+            var lastErr = null;
+            for (var t = 0; t < types.length; t++) {
+                try {
+                    var r = await c.auth.verifyOtp({ email: email, token: token, type: types[t] });
+                    if (!r.error) return r.data && r.data.user ? r.data.user : null;
+                    lastErr = r.error;
+                } catch(e) { lastErr = e; }
+            }
+            var msg = lastErr ? (lastErr.message || '') : '';
+            if (/expired/i.test(msg)) throw new Error('Code expired. Please request a new one.');
+            throw new Error('Invalid code — please check and try again.');
+        }
+
+        // hasExistingAccount — checks user_balances. Returns true/false/null.
+        async function hasExistingAccount(hiveId, userId) {
+            try {
+                var r = await _client(hiveId).from('user_balances').select('user_id').eq('user_id', userId).maybeSingle();
+                return !r.error && r.data !== null;
+            } catch(e) { return null; }
+        }
+
+        // initBalance REMOVED — the SQL trigger on auth.users now handles this automatically.
+
+        // ── sendPasswordReset — uses global_directory to find the correct hive ──
+        // If the directory mapping is missing (orphaned user), iterate all user
+        // hives and repair the directory entry when the reset succeeds.
+        async function sendPasswordReset(email) {
+            var dir = await lookupDirectory(email);
+            if (dir) {
+                var idx = dir.hive_id;
+                try {
+                    var r = await _client(idx).auth.resetPasswordForEmail(email, {});
+                    if (r.error) {
+                        console.warn('[IC] resetPasswordForEmail error:', r.error);
+                        return null;
+                    }
+                    return idx;
+                } catch(e) {
+                    console.warn('[IC] resetPasswordForEmail exception:', e);
+                    return null;
+                }
+            }
+
+            // ── Orphaned-user fallback: iterate all user hives ─────────
+            var uh = userHives();
+            for (var i = 0; i < uh.length; i++) {
+                var hIdx = uh[i].index;
+                try {
+                    var r2 = await _client(hIdx).auth.resetPasswordForEmail(email, {});
+                    if (!r2.error) {
+                        // Reset email sent — repair global_directory on Hive 0
+                        console.log('[IC] Orphan recovery: password reset succeeded on hive', hIdx, '— repairing directory.');
+                        await registerDirectory(email, hIdx);
+                        return hIdx;
+                    }
+                } catch(e) { /* try next hive */ }
+            }
+            return null;
+        }
+
+        async function updatePassword(hiveId, newPw) {
+            var r = await _client(hiveId).auth.updateUser({ password: newPw });
+            if (r.error) throw new Error(r.error.message);
+        }
+
+        async function getCurrentUser() {
+            var hiveId = storedHiveId();
+            if (hiveId === null) return null;
+            try {
+                var r = await _client(hiveId).auth.getUser();
+                return r && r.data && r.data.user ? { user: r.data.user, hiveId: hiveId } : null;
+            } catch(e) { return null; }
+        }
+
+        async function logoutAll() {
+            var jobs = _hives.map(function(h) {
+                try { return _client(h.index).auth.signOut(); } catch(_) { return Promise.resolve(); }
+            });
+            await Promise.allSettled(jobs);
+            clearAuth();
+        }
+
+        return {
+            ready: function() { return _ready; },
+            userHives: userHives, client: _client,
+            storedHiveId: storedHiveId, storeAuth: storeAuth, clearAuth: clearAuth,
+            signUp: signUp, signIn: signIn, sendOTP: sendOTP, verifyOTP: verifyOTP,
+            hasExistingAccount: hasExistingAccount,
+            lookupDirectory: lookupDirectory, registerDirectory: registerDirectory,
+            sendPasswordReset: sendPasswordReset, updatePassword: updatePassword,
+            getCurrentUser: getCurrentUser, logoutAll: logoutAll
+        };
+    })();
+    </script>
+
+    <style>
+        /* ============================================
+           DESIGN SYSTEM — CSS VARIABLES
+           ============================================ */
+        :root {
+            /* Colors — Dark Mode (Default) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #0b1120;
+            --bg-card: #162032;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --color-primary: #ef4444;
+            --color-primary-hover: #dc2626;
+            --color-primary-glow: rgba(239, 68, 68, 0.15);
+            --color-accent: #f87171;
+            --color-error: #7f1d1d;
+            --color-warning: #f59e0b;
+            --border-color: rgba(239, 68, 68, 0.12);
+            --border-color-hover: rgba(239, 68, 68, 0.3);
+            --color-positive: #22c55e;
+            --color-negative: #ef4444;
+            --color-tab-active: #3b82f6;
+
+            /* Spacing */
+            --space-xs: 8px;
+            --space-sm: 16px;
+            --space-md: 24px;
+            --space-lg: 32px;
+            --space-xl: 48px;
+            --space-2xl: 64px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+            --font-size-xs: 0.75rem;
+            --font-size-sm: 0.875rem;
+            --font-size-base: 1rem;
+            --font-size-lg: 1.125rem;
+            --font-size-xl: 1.25rem;
+            --font-size-2xl: 1.5rem;
+            --font-size-3xl: 2rem;
+            --font-size-4xl: 2.75rem;
+            --font-weight-normal: 400;
+            --font-weight-medium: 500;
+            --font-weight-semibold: 600;
+            --font-weight-bold: 700;
+
+            /* Borders & Shadows */
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --radius-xl: 24px;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.35);
+            --shadow-lg: 0 8px 32px rgba(0,0,0,0.4);
+            --shadow-card: 0 4px 24px rgba(0,0,0,0.3), 0 1px 4px rgba(239,68,68,0.06);
+
+            /* Transitions */
+            --transition-fast: 150ms ease;
+            --transition-base: 250ms ease;
+            --transition-slow: 400ms ease;
+
+            /* Layout */
+            --container-max: 1200px;
+            --nav-height: 72px;
+        }
+
+        /* Light mode override */
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg-primary: #ffffff;
+                --bg-secondary: #f8fafc;
+                --bg-tertiary: #f1f5f9;
+                --bg-card: #ffffff;
+                --text-primary: #0f172a;
+                --text-secondary: #475569;
+                --text-muted: #94a3b8;
+                --border-color: rgba(239,68,68,0.15);
+                --border-color-hover: rgba(239,68,68,0.35);
+                --shadow-card: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(220,38,38,0.04);
+            }
+            .nav {
+                background: rgba(255, 255, 255, 0.88) !important;
+            }
+        }
+
+        /* ============================================
+           SUPABASE EMAIL NOTICE
+           ============================================ */
+        .email-sender-notice {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            background: rgba(59, 130, 246, 0.08);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: var(--radius-md);
+            padding: 12px 14px;
+            margin-top: 12px;
+            font-size: var(--font-size-xs);
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .email-sender-notice svg {
+            flex-shrink: 0;
+            width: 16px;
+            height: 16px;
+            stroke: #3b82f6;
+            fill: none;
+            margin-top: 1px;
+        }
+
+        .email-sender-notice strong {
+            color: var(--text-primary);
+        }
+
+        /* ============================================
+           RESET & BASE
+           ============================================ */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+            font-family: var(--font-family);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            display: flex;
+            flex-direction: column;
+        }
+
+        a {
+            color: var(--color-primary);
+            text-decoration: none;
+            transition: color var(--transition-fast);
+        }
+
+        a:hover {
+            color: var(--color-primary-hover);
+        }
+
+        .container {
+            max-width: var(--container-max);
+            margin: 0 auto;
+            padding: 0 var(--space-md);
+        }
+
+        /* ============================================
+           BRAND GRADIENT
+           ============================================ */
+        .brand-gradient {
+            background: linear-gradient(135deg, var(--color-primary), var(--color-accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* ============================================
+           NAVIGATION
+           ============================================ */
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: var(--nav-height);
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border-color);
+            z-index: 1000;
+            transition: background var(--transition-base);
+        }
+
+        .nav-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 100%;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
+            flex-shrink: 0;
+        }
+
+        .nav-brand:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-brand img {
+            height: 42px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .nav-brand span {
+            font-size: var(--font-size-xl);
+            font-weight: var(--font-weight-bold);
+            letter-spacing: -0.5px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            padding: 6px 4px;
+            transition: color var(--transition-fast);
+            position: relative;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--color-primary);
+            border-radius: 1px;
+            transition: width var(--transition-base);
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        .nav-register {
+            padding: 8px 20px !important;
+            background: var(--color-primary) !important;
+            color: #ffffff !important;
+            border-radius: var(--radius-md) !important;
+            font-weight: var(--font-weight-medium) !important;
+        }
+
+        .nav-register::after {
+            display: none !important;
+        }
+
+        .nav-register:hover {
+            background: var(--color-primary-hover) !important;
+            box-shadow: 0 4px 16px rgba(239,68,68,0.3);
+        }
+
+        /* Mobile toggle */
+        .nav-toggle {
+            display: none;
+            flex-direction: column;
+            gap: 5px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 8px;
+            z-index: 1001;
+        }
+
+        .nav-toggle span {
+            display: block;
+            width: 24px;
+            height: 2px;
+            background: var(--text-primary);
+            border-radius: 2px;
+            transition: all var(--transition-base);
+        }
+
+        .nav-toggle.active span:nth-child(1) {
+            transform: rotate(45deg) translate(5px, 5px);
+        }
+
+        .nav-toggle.active span:nth-child(2) {
+            opacity: 0;
+        }
+
+        .nav-toggle.active span:nth-child(3) {
+            transform: rotate(-45deg) translate(5px, -5px);
+        }
+
+        /* ============================================
+           BUTTONS
+           ============================================ */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: var(--radius-md);
+            font-family: var(--font-family);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-semibold);
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: var(--color-primary);
+            color: #fff;
+            border-color: var(--color-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--color-primary-hover);
+            box-shadow: 0 4px 20px rgba(239,68,68,0.35);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-primary);
+            border-color: var(--border-color-hover);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--color-primary);
+            color: var(--color-primary);
+            background: var(--color-primary-glow);
+        }
+
+        .btn-spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .btn-full {
+            width: 100%;
+        }
+
+        /* ============================================
+           CARD
+           ============================================ */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: var(--space-lg);
+            box-shadow: var(--shadow-card);
+        }
+
+        /* ============================================
+           FORM INPUTS
+           ============================================ */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: var(--space-sm);
+        }
+
+        .form-group label {
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            color: var(--text-primary);
+        }
+
+        input[type="email"],
+        input[type="password"],
+        input[type="text"] {
+            width: 100%;
+            padding: 11px 14px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-family: var(--font-family);
+            font-size: var(--font-size-sm);
+            outline: none;
+            transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+        }
+
+        input:focus {
+            border-color: var(--color-primary);
+            box-shadow: 0 0 0 3px var(--color-primary-glow);
+        }
+
+        input::placeholder {
+            color: var(--text-muted);
+            opacity: 0.7;
+        }
+
+        /* ============================================
+           AUTH LAYOUT
+           ============================================ */
+        .auth-wrapper {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: calc(var(--nav-height) + var(--space-xl)) var(--space-md) var(--space-xl);
+            min-height: calc(100vh - 280px);
+        }
+
+        .auth-card {
+            width: 100%;
+            max-width: 480px;
+        }
+
+        /* ============================================
+           AUTH STEPS
+           ============================================ */
+        .auth-step {
+            display: none;
+        }
+
+        .auth-step.active {
+            display: block;
+        }
+
+        .step-label {
+            display: inline-block;
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--color-primary);
+            margin-bottom: var(--space-xs);
+        }
+
+        .step-title {
+            font-size: var(--font-size-2xl);
+            font-weight: var(--font-weight-bold);
+            margin-bottom: 6px;
+            line-height: 1.3;
+        }
+
+        .step-desc {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            margin-bottom: var(--space-md);
+            line-height: 1.6;
+        }
+
+        /* ============================================
+           AUTH ICON
+           ============================================ */
+        .auth-icon-area {
+            display: flex;
+            justify-content: center;
+            margin-bottom: var(--space-md);
+        }
+
+        .auth-icon-area svg {
+            width: 56px;
+            height: 56px;
+            stroke: var(--color-primary);
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* ============================================
+           AUTH TABS
+           ============================================ */
+        .auth-tabs {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-secondary);
+            border-radius: var(--radius-md);
+            padding: 4px;
+            margin-bottom: var(--space-md);
+        }
+
+        .auth-tab {
+            flex: 1;
+            padding: 10px 16px;
+            background: transparent;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-family: var(--font-family);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .auth-tab:hover {
+            color: var(--text-secondary);
+        }
+
+        .auth-tab.active {
+            background: var(--color-primary);
+            color: #fff;
+            font-weight: var(--font-weight-semibold);
+            box-shadow: var(--shadow-sm);
+        }
+
+        /* ============================================
+           STATUS MESSAGES
+           ============================================ */
+        .status-msg {
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            font-size: var(--font-size-sm);
+            line-height: 1.5;
+            margin-bottom: var(--space-sm);
+            display: none;
+        }
+
+        .status-msg.visible {
+            display: block;
+        }
+
+        .status-msg.error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            color: #fca5a5;
+        }
+
+        .status-msg.success {
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.25);
+            color: #86efac;
+        }
+
+        .status-msg.info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.25);
+            color: #93c5fd;
+        }
+
+        @media (prefers-color-scheme: light) {
+            .status-msg.error {
+                background: rgba(239, 68, 68, 0.06);
+                color: #dc2626;
+            }
+            .status-msg.success {
+                background: rgba(34, 197, 94, 0.06);
+                color: #16a34a;
+            }
+            .status-msg.info {
+                background: rgba(59, 130, 246, 0.06);
+                color: #2563eb;
+            }
+        }
+
+        /* ============================================
+           OTP INPUT
+           ============================================ */
+        .otp-input {
+            font-size: 2rem !important;
+            letter-spacing: 0.3em;
+            text-align: center;
+            font-weight: var(--font-weight-bold);
+            padding: 14px !important;
+        }
+
+        /* ============================================
+           LOGIN EXTRAS
+           ============================================ */
+        .login-extras {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: var(--space-sm);
+            font-size: var(--font-size-sm);
+        }
+
+        .login-extras label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: var(--font-size-sm);
+        }
+
+        .login-extras label input[type="checkbox"] {
+            accent-color: var(--color-primary);
+            width: 14px;
+            height: 14px;
+        }
+
+        .forgot-btn {
+            background: none;
+            border: none;
+            color: var(--color-primary);
+            font-family: var(--font-family);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            cursor: pointer;
+            padding: 0;
+        }
+
+        .forgot-btn:hover {
+            color: var(--color-primary-hover);
+            text-decoration: underline;
+        }
+
+        /* ============================================
+           TERMS CHECKBOX
+           ============================================ */
+        .terms-group {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: var(--space-sm);
+        }
+
+        .terms-group input[type="checkbox"] {
+            accent-color: var(--color-primary);
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+            flex-shrink: 0;
+        }
+
+        .terms-group label {
+            font-size: var(--font-size-xs);
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .terms-group label a {
+            color: var(--color-primary);
+            font-weight: var(--font-weight-medium);
+            cursor: pointer;
+        }
+
+        .terms-group label a:hover {
+            text-decoration: underline;
+        }
+
+        /* ============================================
+           AUTH TOGGLE TEXT
+           ============================================ */
+        .auth-toggle {
+            text-align: center;
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            margin-top: var(--space-md);
+        }
+
+        .auth-toggle a {
+            color: var(--color-primary);
+            font-weight: var(--font-weight-semibold);
+            cursor: pointer;
+        }
+
+        .auth-toggle a:hover {
+            text-decoration: underline;
+        }
+
+        /* ============================================
+           DIVIDER
+           ============================================ */
+        .auth-divider {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            margin: var(--space-md) 0;
+            color: var(--text-muted);
+            font-size: var(--font-size-sm);
+        }
+
+        .auth-divider::before,
+        .auth-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border-color);
+        }
+
+        /* ============================================
+           OTP EMAIL DISPLAY
+           ============================================ */
+        .otp-email-display {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            margin-bottom: var(--space-md);
+            text-align: center;
+        }
+
+        .otp-email-display strong {
+            color: var(--text-primary);
+        }
+
+        /* ============================================
+           RESEND LINE
+           ============================================ */
+        .resend-line {
+            text-align: center;
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            margin: var(--space-sm) 0;
+        }
+
+        .resend-line a {
+            color: var(--color-primary);
+            font-weight: var(--font-weight-medium);
+            cursor: pointer;
+        }
+
+        .resend-line a:hover {
+            text-decoration: underline;
+        }
+
+        .resend-line a.disabled {
+            color: var(--text-muted);
+            pointer-events: none;
+        }
+
+        /* ============================================
+           SUCCESS CHECKMARK
+           ============================================ */
+        .success-check {
+            display: flex;
+            justify-content: center;
+            margin: var(--space-md) 0;
+        }
+
+        .success-check svg {
+            width: 80px;
+            height: 80px;
+        }
+
+        .success-check circle {
+            fill: none;
+            stroke: var(--color-positive);
+            stroke-width: 2;
+            stroke-dasharray: 220;
+            stroke-dashoffset: 220;
+            animation: circleAnim 0.6s ease forwards;
+        }
+
+        .success-check path {
+            fill: none;
+            stroke: var(--color-positive);
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-dasharray: 60;
+            stroke-dashoffset: 60;
+            animation: checkAnim 0.4s ease 0.5s forwards;
+        }
+
+        @keyframes circleAnim {
+            to { stroke-dashoffset: 0; }
+        }
+
+        @keyframes checkAnim {
+            to { stroke-dashoffset: 0; }
+        }
+
+        .success-message {
+            text-align: center;
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            margin-bottom: var(--space-md);
+            line-height: 1.6;
+        }
+
+        .success-countdown {
+            text-align: center;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            margin-top: var(--space-sm);
+        }
+
+        /* ============================================
+           FOOTER
+           ============================================ */
+        .footer {
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            padding: var(--space-xl) 0 var(--space-lg);
+            margin-top: auto;
+        }
+
+        .footer-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-lg);
+        }
+
+        .footer-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .footer-brand img {
+            height: 32px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .footer-brand span {
+            font-weight: var(--font-weight-semibold);
+            font-size: var(--font-size-lg);
+        }
+
+        .footer-links {
+            display: flex;
+            gap: var(--space-md);
+            list-style: none;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+        }
+
+        .footer-links a:hover {
+            color: var(--color-primary);
+        }
+
+        .footer-disclosure {
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(239, 68, 68, 0.15);
+            background: rgba(239, 68, 68, 0.04);
+            margin-bottom: var(--space-md);
+        }
+
+        .footer-disclosure p {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .footer-powered-by {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: var(--space-sm);
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .footer-powered-by img {
+            height: 20px;
+            width: auto;
+            opacity: 0.6;
+        }
+
+        /* ============================================
+           RESPONSIVE
+           ============================================ */
+        @media (max-width: 768px) {
+            :root {
+                --font-size-4xl: 2rem;
+                --font-size-3xl: 1.5rem;
+            }
+
+            .nav-toggle {
+                display: flex;
+            }
+
+            .nav-links {
+                position: fixed;
+                top: 0;
+                right: -100%;
+                width: 280px;
+                height: 100vh;
+                background: var(--bg-secondary);
+                flex-direction: column;
+                align-items: flex-start;
+                padding: calc(var(--nav-height) + var(--space-md)) var(--space-md) var(--space-md);
+                gap: var(--space-xs);
+                border-left: 1px solid var(--border-color);
+                transition: right var(--transition-base);
+                box-shadow: -8px 0 32px rgba(0,0,0,0.3);
+            }
+
+            .nav-links.open {
+                right: 0;
+            }
+
+            .nav-links a {
+                width: 100%;
+                padding: 12px 16px;
+                border-radius: var(--radius-sm);
+            }
+
+            .nav-links a:hover {
+                background: var(--color-primary-glow);
+            }
+
+            .nav-links a::after {
+                display: none;
+            }
+
+            .nav-register {
+                width: 100%;
+                text-align: center;
+                margin-top: var(--space-xs);
+            }
+
+            .auth-wrapper {
+                padding-top: calc(var(--nav-height) + var(--space-lg));
+                align-items: flex-start;
+            }
+
+            .auth-card {
+                padding: var(--space-md) !important;
+            }
+
+            .footer-top {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .footer-links {
+                flex-direction: column;
+                gap: var(--space-xs);
+            }
+        }
+
+        @media (max-width: 480px) {
+            .auth-card {
+                padding: var(--space-sm) !important;
+            }
+
+            .login-extras {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
+            }
+
+            .otp-input {
+                font-size: 1.5rem !important;
+                letter-spacing: 0.2em;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ============================================
+         NAVIGATION
+         ============================================ -->
+    <header>
+        <nav class="nav" id="navbar">
+            <div class="container nav-inner">
+                <a href="index.html" class="nav-brand">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+
+                <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+
+                <ul class="nav-links" id="navLinks">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Investment Portfolio</a></li>
+                    <li><a href="contact.html">Contact Us</a></li>
+                    <li><a href="auth.html" class="nav-register">Sign In</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <!-- ============================================
+         MAIN — AUTH CARD
+         ============================================ -->
+    <main class="auth-wrapper">
+        <div class="auth-card card">
+
+            <!-- ========== STEP 1: LOGIN / REGISTER ========== -->
+            <div class="auth-step active" id="step-auth">
+                <span class="step-label" id="authStepLabel">Authentication</span>
+                <h2 class="step-title" id="authStepTitle">Welcome Back</h2>
+                <p class="step-desc" id="authStepDesc">Sign in to access your investment portfolio and manage your assets.</p>
+
+                <!-- Icons -->
+                <div class="auth-icon-area">
+                    <svg id="authIconLogin" viewBox="0 0 24 24">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                    <svg id="authIconRegister" style="display:none;" viewBox="0 0 24 24">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                        <circle cx="8.5" cy="7" r="4"/>
+                        <line x1="20" y1="8" x2="20" y2="14"/>
+                        <line x1="23" y1="11" x2="17" y2="11"/>
+                    </svg>
+                </div>
+
+                <!-- Tabs -->
+                <div class="auth-tabs">
+                    <button class="auth-tab active" id="tabLogin" type="button">Sign In</button>
+                    <button class="auth-tab" id="tabRegister" type="button">Register</button>
+                </div>
+
+                <!-- Status -->
+                <div class="status-msg" id="authStatus"></div>
+
+                <!-- Form -->
+                <form id="authForm" autocomplete="on">
+                    <!-- Full Name (register only) -->
+                    <div class="form-group" id="fullnameGroup" style="display:none;">
+                        <label for="fullname">Full Name</label>
+                        <input type="text" id="fullname" name="fullname" placeholder="Enter your full name" autocomplete="name">
+                    </div>
+
+                    <!-- Email -->
+                    <div class="form-group">
+                        <label for="email">Email Address</label>
+                        <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+                    </div>
+
+                    <!-- Password -->
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" placeholder="Enter your password" required minlength="8" autocomplete="current-password">
+                    </div>
+
+                    <!-- Confirm Password (register only) -->
+                    <div class="form-group" id="confirmPasswordGroup" style="display:none;">
+                        <label for="confirm-password">Confirm Password</label>
+                        <input type="password" id="confirm-password" name="confirm-password" placeholder="Confirm your password" autocomplete="new-password">
+                    </div>
+
+                    <!-- Terms (register only) -->
+                    <div id="termsGroup" style="display:none;">
+                        <div class="terms-group">
+                            <input type="checkbox" id="agreeTerms">
+                            <label for="agreeTerms">
+                                I agree to the <a onclick="document.getElementById('termsModal').style.display='flex'">Terms of Service</a> and acknowledge the <a onclick="document.getElementById('riskModal').style.display='flex'">Risk Disclosure</a>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Login Extras (login only) -->
+                    <div class="login-extras" id="loginExtras">
+                        <label>
+                            <input type="checkbox" id="rememberMe"> Remember me
+                        </label>
+                        <button type="button" class="forgot-btn" id="forgotPasswordBtn">Forgot password?</button>
+                    </div>
+
+                    <!-- Submit -->
+                    <button type="submit" class="btn btn-primary btn-full" id="authSubmit">
+                        Sign In
+                    </button>
+                </form>
+
+                <!-- Toggle text -->
+                <p class="auth-toggle" id="authToggleText">
+                    Don't have an account? <a id="authToggleLink">Create one</a>
+                </p>
+            </div>
+
+            <!-- ========== STEP 2: OTP VERIFICATION ========== -->
+            <div class="auth-step" id="step-otp">
+                <span class="step-label">Verification</span>
+                <h2 class="step-title">Enter Verification Code</h2>
+                <p class="step-desc" id="otpDescription">We've sent a one-time code to your email. Enter it below to verify your identity.</p>
+
+                <p class="otp-email-display">Code sent to <strong id="otpEmailDisplay"></strong></p>
+
+                <div class="email-sender-notice" id="otpEmailNotice">
+                    <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span>The email will be sent from <strong>Supabase</strong> (noreply@mail.app.supabase.io). This is our secure authentication provider — the email is from <strong>Tesla InvestCore</strong>. Please check your inbox and spam folder.</span>
+                </div>
+
+                <!-- Status -->
+                <div class="status-msg" id="otpStatus"></div>
+
+                <!-- Form -->
+                <form id="otpForm">
+                    <div class="form-group">
+                        <label for="otpCode">Verification Code</label>
+                        <input type="text" id="otpCode" name="otpCode" class="otp-input" maxlength="8" pattern="[0-9]{6,8}" inputmode="numeric" placeholder="000000" required autocomplete="one-time-code">
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-full" id="otpSubmitBtn">
+                        Verify Code
+                    </button>
+                </form>
+
+                <p class="resend-line">
+                    Didn't receive it? <a id="otpResendLink">Resend code</a>
+                </p>
+
+                <div class="auth-divider">or</div>
+
+                <button type="button" class="btn btn-secondary btn-full" id="otpBackBtn">
+                    ← Back
+                </button>
+            </div>
+
+            <!-- ========== STEP 3: SEND RESET CODE ========== -->
+            <div class="auth-step" id="step-reset-send">
+                <span class="step-label">Password Recovery</span>
+                <h2 class="step-title">Reset Your Password</h2>
+                <p class="step-desc">Enter the email associated with your account and we'll send you a recovery code.</p>
+
+                <div class="email-sender-notice">
+                    <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span>You will receive an email from <strong>Supabase</strong> (noreply@mail.app.supabase.io). This is our secure authentication provider — the email is from <strong>Tesla InvestCore</strong>. Please also check your spam folder.</span>
+                </div>
+
+                <!-- Status -->
+                <div class="status-msg" id="resetSendStatus"></div>
+
+                <!-- Form -->
+                <form id="resetSendForm">
+                    <div class="form-group">
+                        <label for="resetEmail">Email Address</label>
+                        <input type="email" id="resetEmail" name="resetEmail" placeholder="you@example.com" required autocomplete="email">
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-full" id="resetSendBtn">
+                        Send Recovery Code
+                    </button>
+                </form>
+
+                <div class="auth-divider">or</div>
+
+                <button type="button" class="btn btn-secondary btn-full" id="resetBackBtn">
+                    ← Back to Sign In
+                </button>
+            </div>
+
+            <!-- ========== STEP 4: SET NEW PASSWORD ========== -->
+            <div class="auth-step" id="step-reset-password">
+                <span class="step-label">Password Recovery</span>
+                <h2 class="step-title">Set New Password</h2>
+                <p class="step-desc">Choose a strong password for your account. Must be at least 8 characters.</p>
+
+                <!-- Status -->
+                <div class="status-msg" id="resetPasswordStatus"></div>
+
+                <!-- Form -->
+                <form id="resetPasswordForm">
+                    <div class="form-group" id="resetOtpGroup">
+                        <label for="resetOtpCode">Recovery Code</label>
+                        <input type="text" id="resetOtpCode" name="resetOtpCode" class="otp-input" maxlength="8" pattern="[0-9]{6,8}" inputmode="numeric" placeholder="000000" autocomplete="one-time-code">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="newPassword">New Password</label>
+                        <input type="password" id="newPassword" name="newPassword" placeholder="Enter new password" required minlength="8" autocomplete="new-password">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="confirmNewPassword">Confirm New Password</label>
+                        <input type="password" id="confirmNewPassword" name="confirmNewPassword" placeholder="Confirm new password" required autocomplete="new-password">
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-full" id="resetPasswordBtn">
+                        Update Password
+                    </button>
+                </form>
+
+                <div class="auth-divider">or</div>
+
+                <button type="button" class="btn btn-secondary btn-full" id="resetPasswordBackBtn">
+                    ← Back to Sign In
+                </button>
+            </div>
+
+            <!-- ========== STEP 5: SUCCESS ========== -->
+            <div class="auth-step" id="step-success">
+                <span class="step-label">Completed</span>
+                <h2 class="step-title" id="successTitle" style="text-align:center;">Success!</h2>
+                <p class="step-desc" id="successDesc" style="text-align:center;">Your action has been completed successfully.</p>
+
+                <div class="success-check">
+                    <svg viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="35"/>
+                        <path d="M24 42 L34 52 L56 30"/>
+                    </svg>
+                </div>
+
+                <p class="success-message" id="successMessage"></p>
+
+                <button type="button" class="btn btn-primary btn-full" id="successActionBtn">
+                    Continue to Portfolio
+                </button>
+
+                <p class="success-countdown" id="successCountdown"></p>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- ============================================
+         TERMS MODAL
+         ============================================ -->
+    <div id="termsModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:9999; overflow-y:auto; padding:24px;">
+        <div style="max-width:640px; margin:40px auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); padding:32px; position:relative;">
+            <button onclick="document.getElementById('termsModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
+            <h2 style="color:var(--text-primary);margin-bottom:16px;">Terms of Service</h2>
+            <div style="color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.8;">
+                <p style="margin-bottom:12px;">By using Tesla InvestCore, you agree to these terms. Tesla InvestCore provides AI-powered investment management services on a profit-share basis.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Account Responsibility:</strong> You are responsible for maintaining the confidentiality of your account credentials. You must be at least 18 years old to use this platform.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Investment Risk:</strong> All investments carry risk. Past performance does not guarantee future results. You may lose some or all of your invested capital.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Profit Share:</strong> Tesla InvestCore earns only when you earn. No fees are charged on losses.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Prohibited Use:</strong> You may not use the platform for money laundering, fraud, or any illegal activity.</p>
+                <p><strong style="color:var(--text-primary);">Amendments:</strong> Tesla InvestCore reserves the right to update these terms at any time. Continued use constitutes acceptance.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         RISK MODAL
+         ============================================ -->
+    <div id="riskModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:9999; overflow-y:auto; padding:24px;">
+        <div style="max-width:640px; margin:40px auto; background:var(--bg-card); border:1px solid var(--border-color); border-radius:var(--radius-lg); padding:32px; position:relative;">
+            <button onclick="document.getElementById('riskModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);font-size:1.4rem;cursor:pointer;">✕</button>
+            <h2 style="color:var(--color-primary);margin-bottom:16px;">Risk Disclosure</h2>
+            <div style="color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.8;">
+                <p style="margin-bottom:12px;">Trading in cryptocurrencies, forex, stocks, commodities, and real estate involves significant risk and may not be suitable for all investors.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Capital Risk:</strong> You may lose some or all of your invested capital. Never invest money you cannot afford to lose.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Market Volatility:</strong> Financial markets can be highly volatile. Prices can move rapidly and unpredictably.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">Leverage Risk:</strong> Leveraged trading amplifies both gains and losses. Losses can exceed your initial deposit.</p>
+                <p style="margin-bottom:12px;"><strong style="color:var(--text-primary);">AI Trading:</strong> While our AI engine is designed for optimal performance, no algorithm can guarantee profits or eliminate risk.</p>
+                <p><strong style="color:var(--text-primary);">Regulatory:</strong> Investment products may not be available or regulated in all jurisdictions.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         FOOTER
+         ============================================ -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-top">
+                <a href="index.html" class="footer-brand">
+                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+                <ul class="footer-links">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Portfolio</a></li>
+                    <li><a href="contact.html">Contact</a></li>
+                    <li><a href="auth.html">Login / Register</a></li>
+                </ul>
+            </div>
+
+            <div class="footer-disclosure">
+                <p>
+                    <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
+                    Tesla InvestCore is committed to delivering consistent returns through AI-powered precision trading across all major asset classes.
+                    Our advanced algorithms continuously optimize every portfolio for maximum growth. Your capital is actively protected and managed around the clock across crypto, forex, stocks, commodities, and real estate.
+                </p>
+            </div>
+
+            <div style="display:flex; gap: var(--space-md); margin-bottom: var(--space-md); flex-wrap: wrap;">
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Privacy Policy</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Terms of Service</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Risk Disclosure</a>
+            </div>
+
+            <div class="footer-bottom">
+                &copy; 2026 Tesla InvestCore. All rights reserved.
+            </div>
+
+            <div class="footer-powered-by">
+                <span>Powered by</span>
+                <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
+            </div>
+        </div>
+    </footer>
+
+    <!-- ============================================
+         AUTH LOGIC
+         ============================================ -->
+    <script>
+    (function() {
+        'use strict';
+
+        /* ==========================================
+           MOBILE NAVIGATION TOGGLE
+           ========================================== */
+        var navToggle = document.getElementById('navToggle');
+        var navLinks  = document.getElementById('navLinks');
+
+        navToggle.addEventListener('click', function() {
+            navToggle.classList.toggle('active');
+            navLinks.classList.toggle('open');
+        });
+
+        navLinks.querySelectorAll('a').forEach(function(link) {
+            link.addEventListener('click', function() {
+                navToggle.classList.remove('active');
+                navLinks.classList.remove('open');
+            });
+        });
+
+        /* ==========================================
+           CLOSE MODALS ON OUTSIDE CLICK
+           ========================================== */
+        ['termsModal', 'riskModal'].forEach(function(id) {
+            var modal = document.getElementById(id);
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) modal.style.display = 'none';
+            });
+        });
+
+        /* ==========================================
+           STATE VARIABLES
+           ========================================== */
+        var currentMode  = 'login';   // 'login' | 'register'
+        var otpPurpose   = '';        // 'signup' | 'login' | 'recovery'
+        var currentEmail = '';
+        var signupHiveId = null;      // the ONE hive that sent the OTP — never changed during verification
+        var otpTimer     = null;
+
+        /* ==========================================
+           DOM REFERENCES
+           ========================================== */
+        var $stepAuth         = document.getElementById('step-auth');
+        var $stepOtp          = document.getElementById('step-otp');
+        var $stepResetSend    = document.getElementById('step-reset-send');
+        var $stepResetPw      = document.getElementById('step-reset-password');
+        var $stepSuccess      = document.getElementById('step-success');
+
+        var $authStepLabel    = document.getElementById('authStepLabel');
+        var $authStepTitle    = document.getElementById('authStepTitle');
+        var $authStepDesc     = document.getElementById('authStepDesc');
+        var $authIconLogin    = document.getElementById('authIconLogin');
+        var $authIconRegister = document.getElementById('authIconRegister');
+        var $tabLogin         = document.getElementById('tabLogin');
+        var $tabRegister      = document.getElementById('tabRegister');
+        var $authStatus       = document.getElementById('authStatus');
+        var $authForm         = document.getElementById('authForm');
+        var $fullnameGroup    = document.getElementById('fullnameGroup');
+        var $fullname         = document.getElementById('fullname');
+        var $email            = document.getElementById('email');
+        var $password         = document.getElementById('password');
+        var $confirmPwGroup   = document.getElementById('confirmPasswordGroup');
+        var $confirmPw        = document.getElementById('confirm-password');
+        var $termsGroup       = document.getElementById('termsGroup');
+        var $agreeTerms       = document.getElementById('agreeTerms');
+        var $loginExtras      = document.getElementById('loginExtras');
+        var $authSubmit       = document.getElementById('authSubmit');
+        var $authToggleText   = document.getElementById('authToggleText');
+        var $authToggleLink   = document.getElementById('authToggleLink');
+        var $forgotBtn        = document.getElementById('forgotPasswordBtn');
+
+        var $otpDescription   = document.getElementById('otpDescription');
+        var $otpEmailDisplay  = document.getElementById('otpEmailDisplay');
+        var $otpStatus        = document.getElementById('otpStatus');
+        var $otpForm          = document.getElementById('otpForm');
+        var $otpCode          = document.getElementById('otpCode');
+        var $otpSubmitBtn     = document.getElementById('otpSubmitBtn');
+        var $otpResendLink    = document.getElementById('otpResendLink');
+        var $otpBackBtn       = document.getElementById('otpBackBtn');
+
+        var $resetSendStatus  = document.getElementById('resetSendStatus');
+        var $resetSendForm    = document.getElementById('resetSendForm');
+        var $resetEmail       = document.getElementById('resetEmail');
+        var $resetSendBtn     = document.getElementById('resetSendBtn');
+        var $resetBackBtn     = document.getElementById('resetBackBtn');
+
+        var $resetPwStatus    = document.getElementById('resetPasswordStatus');
+        var $resetPwForm      = document.getElementById('resetPasswordForm');
+        var $resetOtpGroup    = document.getElementById('resetOtpGroup');
+        var $resetOtpCode     = document.getElementById('resetOtpCode');
+        var $newPassword      = document.getElementById('newPassword');
+        var $confirmNewPw     = document.getElementById('confirmNewPassword');
+        var $resetPwBtn       = document.getElementById('resetPasswordBtn');
+        var $resetPwBackBtn   = document.getElementById('resetPasswordBackBtn');
+
+        var $successTitle     = document.getElementById('successTitle');
+        var $successDesc      = document.getElementById('successDesc');
+        var $successMessage   = document.getElementById('successMessage');
+        var $successActionBtn = document.getElementById('successActionBtn');
+        var $successCountdown = document.getElementById('successCountdown');
+
+        /* ==========================================
+           HELPER: SHOW STEP
+           ========================================== */
+        function showStep(id) {
+            [$stepAuth, $stepOtp, $stepResetSend, $stepResetPw, $stepSuccess].forEach(function(s) {
+                s.classList.remove('active');
+            });
+            document.getElementById(id).classList.add('active');
+        }
+
+        /* ==========================================
+           HELPER: SET / HIDE STATUS
+           ========================================== */
+        function setStatus(el, msg, type) {
+            el.textContent = msg;
+            el.className = 'status-msg visible ' + (type || 'error');
+        }
+
+        function hideStatus(el) {
+            el.textContent = '';
+            el.className = 'status-msg';
+        }
+
+        /* ==========================================
+           HELPER: SANITIZE ERROR
+           ========================================== */
+        function sanitizeError(msg) {
+            if (!msg) return 'Something went wrong. Please try again.';
+            var s = String(msg);
+            if (/rate.?limit|too many/i.test(s)) return 'Too many attempts. Please wait a few minutes and try again.';
+            if (/email not confirmed/i.test(s)) return 'Your email has not been confirmed yet. Check your inbox for an email from Supabase (our secure auth provider).';
+            if (/invalid.*cred|invalid login/i.test(s)) return 'Invalid email or password.';
+            if (/password.*short|password.*weak|at least/i.test(s)) return 'Password must be at least 8 characters.';
+            if (/expired/i.test(s)) return 'Code expired. Please request a new one.';
+            if (/already.*registered|already.*exist/i.test(s)) return 'An account with this email already exists.';
+            if (/network|fetch|connect/i.test(s)) return 'Network error. Please check your connection and try again.';
+            return s;
+        }
+
+        /* ==========================================
+           HELPER: OTP COUNTDOWN
+           ========================================== */
+        function startOtpCountdown() {
+            clearOtpCountdown();
+            var remaining = 60;
+            $otpResendLink.classList.add('disabled');
+            $otpResendLink.textContent = 'Resend in ' + remaining + 's';
+            otpTimer = setInterval(function() {
+                remaining--;
+                if (remaining <= 0) {
+                    clearOtpCountdown();
+                    $otpResendLink.textContent = 'Resend code';
+                    $otpResendLink.classList.remove('disabled');
+                } else {
+                    $otpResendLink.textContent = 'Resend in ' + remaining + 's';
+                }
+            }, 1000);
+        }
+
+        function clearOtpCountdown() {
+            if (otpTimer) { clearInterval(otpTimer); otpTimer = null; }
+        }
+
+        /* ==========================================
+           HELPER: BUTTON LOADING STATE
+           ========================================== */
+        function setBtnLoading(btn, loading, originalText) {
+            if (loading) {
+                btn.disabled = true;
+                btn.dataset.origText = btn.textContent;
+                btn.innerHTML = '<span class="btn-spinner"></span> Please wait…';
+            } else {
+                btn.disabled = false;
+                btn.textContent = originalText || btn.dataset.origText || 'Submit';
+            }
+        }
+
+        /* ==========================================
+           HELPER: SUCCESS + REDIRECT
+           ========================================== */
+        var successTimer = null;
+
+        function showSuccessAndRedirect(title, desc, message, url, btnLabel, seconds) {
+            if (successTimer) { clearInterval(successTimer); successTimer = null; }
+            $successTitle.textContent = title || 'Success!';
+            $successDesc.textContent  = desc || '';
+            $successMessage.textContent = message || '';
+            $successActionBtn.textContent = btnLabel || 'Continue';
+            $successActionBtn.onclick = function() { window.location.href = url; };
+
+            var remaining = seconds || 5;
+            $successCountdown.textContent = 'Redirecting in ' + remaining + ' seconds…';
+
+            showStep('step-success');
+
+            successTimer = setInterval(function() {
+                remaining--;
+                if (remaining <= 0) {
+                    clearInterval(successTimer);
+                    successTimer = null;
+                    window.location.href = url;
+                } else {
+                    $successCountdown.textContent = 'Redirecting in ' + remaining + ' second' + (remaining === 1 ? '' : 's') + '…';
+                }
+            }, 1000);
+        }
+
+        /* ==========================================
+           SWITCH MODE (LOGIN ↔ REGISTER)
+           ========================================== */
+        function switchMode(mode) {
+            currentMode = mode;
+            hideStatus($authStatus);
+
+            if (mode === 'register') {
+                $authStepLabel.textContent    = 'Get Started';
+                $authStepTitle.textContent    = 'Create Account';
+                $authStepDesc.textContent     = 'Join Tesla InvestCore and start building your AI-powered investment portfolio.';
+                $authIconLogin.style.display  = 'none';
+                $authIconRegister.style.display = 'block';
+                $tabLogin.classList.remove('active');
+                $tabRegister.classList.add('active');
+                $fullnameGroup.style.display     = 'flex';
+                $confirmPwGroup.style.display    = 'flex';
+                $termsGroup.style.display        = 'block';
+                $loginExtras.style.display       = 'none';
+                $authSubmit.textContent          = 'Create Account';
+                $authToggleText.innerHTML        = 'Already have an account? <a id="authToggleLink">Sign in</a>';
+                $password.autocomplete           = 'new-password';
+                $fullname.required               = true;
+                $confirmPw.required              = true;
+            } else {
+                $authStepLabel.textContent    = 'Authentication';
+                $authStepTitle.textContent    = 'Welcome Back';
+                $authStepDesc.textContent     = 'Sign in to access your investment portfolio and manage your assets.';
+                $authIconLogin.style.display  = 'block';
+                $authIconRegister.style.display = 'none';
+                $tabRegister.classList.remove('active');
+                $tabLogin.classList.add('active');
+                $fullnameGroup.style.display     = 'none';
+                $confirmPwGroup.style.display    = 'none';
+                $termsGroup.style.display        = 'none';
+                $loginExtras.style.display       = 'flex';
+                $authSubmit.textContent          = 'Sign In';
+                $authToggleText.innerHTML        = 'Don\'t have an account? <a id="authToggleLink">Create one</a>';
+                $password.autocomplete           = 'current-password';
+                $fullname.required               = false;
+                $confirmPw.required              = false;
+            }
+
+            // Re-bind toggle link
+            document.getElementById('authToggleLink').addEventListener('click', function() {
+                switchMode(currentMode === 'login' ? 'register' : 'login');
+            });
+        }
+
+        /* ==========================================
+           TAB CLICKS
+           ========================================== */
+        $tabLogin.addEventListener('click', function() { switchMode('login'); });
+        $tabRegister.addEventListener('click', function() { switchMode('register'); });
+        $authToggleLink.addEventListener('click', function() { switchMode('register'); });
+
+        /* ==========================================
+           FLOW 1 & 2: AUTH FORM SUBMIT
+           ========================================== */
+        $authForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            hideStatus($authStatus);
+
+            var email    = $email.value.trim();
+            var password = $password.value;
+
+            if (!email) { setStatus($authStatus, 'Please enter your email address.', 'error'); return; }
+
+            if (currentMode === 'login') {
+                /* ---- FLOW 1: LOGIN ---- */
+                if (!password) { setStatus($authStatus, 'Please enter your password.', 'error'); return; }
+
+                setBtnLoading($authSubmit, true);
+                try {
+                    var result = await window._IC.signIn(email, password);
+                    // initBalance removed — SQL trigger handles it
+                    window.location.href = 'portfolio.html';
+                } catch(err) {
+                    if (err.code === 'EMAIL_NOT_CONFIRMED') {
+                        // Send OTP and go to verification
+                        try {
+                            currentEmail = email;
+                            signupHiveId = await window._IC.sendOTP(email);
+                            otpPurpose   = 'login';
+                            $otpEmailDisplay.textContent = email;
+                            $otpDescription.textContent  = 'Your email has not been confirmed yet. We sent a verification code — enter it below to sign in.';
+                            showStep('step-otp');
+                            startOtpCountdown();
+                        } catch(otpErr) {
+                            setStatus($authStatus, sanitizeError(otpErr.message), 'error');
+                        }
+                    } else {
+                        setStatus($authStatus, sanitizeError(err.message), 'error');
+                    }
+                } finally {
+                    setBtnLoading($authSubmit, false, 'Sign In');
+                }
+
+            } else {
+                /* ---- FLOW 2: REGISTER ---- */
+                var fullName  = $fullname.value.trim();
+                var confirmPw = $confirmPw.value;
+
+                if (!fullName) { setStatus($authStatus, 'Please enter your full name.', 'error'); return; }
+                if (!password) { setStatus($authStatus, 'Please enter a password.', 'error'); return; }
+                if (password.length < 8) { setStatus($authStatus, 'Password must be at least 8 characters.', 'error'); return; }
+                if (password !== confirmPw) { setStatus($authStatus, 'Passwords do not match.', 'error'); return; }
+                if (!$agreeTerms.checked) { setStatus($authStatus, 'Please agree to the Terms of Service and Risk Disclosure.', 'error'); return; }
+
+                setBtnLoading($authSubmit, true);
+                try {
+                    currentEmail = email;
+
+                    // Attempt signup directly.
+                    // signUp() detects existing emails via identities:[] ghost user check.
+                    var signUpResult;
+                    var signUpFailed = false;
+                    try {
+                        signUpResult = await window._IC.signUp(email, password, { full_name: fullName });
+                    } catch(signUpErr) {
+                        signUpFailed = true;
+                        // signUp failed — email likely already registered.
+                        // Try sending an OTP so the user can log in directly.
+                        var existingHive = await window._IC.sendOTP(email);
+                        if (existingHive !== null) {
+                            signupHiveId = existingHive;
+                            otpPurpose   = 'login';
+                            $otpEmailDisplay.textContent = email;
+                            $otpDescription.textContent  = 'This email is already registered. We sent a sign-in code — enter it to log in.';
+                            setStatus($otpStatus, 'This email is already registered. We sent a sign-in code — enter it to log in.', 'info');
+                            showStep('step-otp');
+                            startOtpCountdown();
+                        } else {
+                            throw signUpErr;
+                        }
+                    }
+
+                    if (!signUpFailed) {
+                        // Signup succeeded — send OTP for email confirmation
+                        signupHiveId = signUpResult.hiveId;
+                        otpPurpose   = 'signup';
+                        await window._IC.sendOTP(email);
+                        $otpEmailDisplay.textContent = email;
+                        $otpDescription.textContent  = 'We\'ve sent a verification code to confirm your email. Enter it below to activate your account.';
+                        showStep('step-otp');
+                        startOtpCountdown();
+                    }
+
+                } catch(err) {
+                    setStatus($authStatus, sanitizeError(err.message), 'error');
+                } finally {
+                    setBtnLoading($authSubmit, false, 'Create Account');
+                }
+            }
+        });
+
+        /* ==========================================
+           FLOW 3: OTP VERIFICATION
+           ========================================== */
+        $otpForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            hideStatus($otpStatus);
+
+            var code = $otpCode.value.trim();
+            if (!code) { setStatus($otpStatus, 'Please enter the verification code.', 'error'); return; }
+
+            // CRITICAL: check signupHiveId
+            if (signupHiveId === null || signupHiveId === undefined) {
+                setStatus($otpStatus, 'Session expired. Please go back and start again.', 'error');
+                return;
+            }
+
+            setBtnLoading($otpSubmitBtn, true);
+            try {
+                var user = await window._IC.verifyOTP(signupHiveId, currentEmail, code);
+
+                if (!user || !user.id) {
+                    throw new Error('Verification failed. Please try again.');
+                }
+
+                // GUARD for login/recovery: check account existence
+                if (otpPurpose === 'login' || otpPurpose === 'recovery') {
+                    var hasAccount = await window._IC.hasExistingAccount(signupHiveId, user.id);
+                    if (hasAccount === false) {
+                        // No account found — sign out and reject
+                        try { await window._IC.client(signupHiveId).auth.signOut(); } catch(_) {}
+                        window._IC.clearAuth();
+                        throw new Error('No account found for this email. Please register first.');
+                    }
+                }
+
+                // Store auth
+                window._IC.storeAuth(
+                    signupHiveId,
+                    user.id,
+                    currentEmail,
+                    user.user_metadata ? user.user_metadata.full_name || '' : ''
+                );
+
+                clearOtpCountdown();
+
+                if (otpPurpose === 'signup') {
+                    // initBalance removed — SQL trigger handles it automatically
+                    showSuccessAndRedirect(
+                        'Account Created!',
+                        'Your Tesla InvestCore account is ready.',
+                        'Welcome to Tesla InvestCore! Your AI-powered investment portfolio has been initialized.',
+                        'portfolio.html',
+                        'Go to Portfolio',
+                        5
+                    );
+                } else if (otpPurpose === 'login') {
+                    showSuccessAndRedirect(
+                        'Welcome Back!',
+                        'You have been signed in successfully.',
+                        'Redirecting you to your investment portfolio…',
+                        'portfolio.html',
+                        'Go to Portfolio',
+                        3
+                    );
+                } else if (otpPurpose === 'recovery') {
+                    // Go to set new password step
+                    $resetOtpGroup.style.display = 'none';
+                    showStep('step-reset-password');
+                }
+            } catch(err) {
+                setStatus($otpStatus, sanitizeError(err.message), 'error');
+            } finally {
+                setBtnLoading($otpSubmitBtn, false, 'Verify Code');
+            }
+        });
+
+        /* ==========================================
+           RESEND OTP
+           ========================================== */
+        $otpResendLink.addEventListener('click', async function(e) {
+            e.preventDefault();
+            if ($otpResendLink.classList.contains('disabled')) return;
+            if (signupHiveId === null || signupHiveId === undefined) {
+                setStatus($otpStatus, 'Session expired. Please go back and start again.', 'error');
+                return;
+            }
+
+            hideStatus($otpStatus);
+            $otpResendLink.classList.add('disabled');
+            $otpResendLink.textContent = 'Sending…';
+
+            try {
+                if (otpPurpose === 'recovery') {
+                    await window._IC.client(signupHiveId).auth.resetPasswordForEmail(currentEmail, {});
+                } else {
+                    await window._IC.client(signupHiveId).auth.signInWithOtp({ email: currentEmail, options: { shouldCreateUser: false } });
+                }
+                setStatus($otpStatus, 'A new code has been sent to your email. Look for an email from Supabase — it\'s from Tesla InvestCore.', 'success');
+                startOtpCountdown();
+            } catch(err) {
+                setStatus($otpStatus, sanitizeError(err.message), 'error');
+                $otpResendLink.textContent = 'Resend code';
+                $otpResendLink.classList.remove('disabled');
+            }
+        });
+
+        /* ==========================================
+           OTP BACK BUTTON
+           ========================================== */
+        $otpBackBtn.addEventListener('click', function() {
+            clearOtpCountdown();
+            hideStatus($otpStatus);
+            $otpCode.value = '';
+            showStep('step-auth');
+        });
+
+        /* ==========================================
+           FLOW 4: FORGOT PASSWORD
+           ========================================== */
+        $forgotBtn.addEventListener('click', function() {
+            hideStatus($authStatus);
+            $resetEmail.value = $email.value.trim();
+            showStep('step-reset-send');
+        });
+
+        $resetSendForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            hideStatus($resetSendStatus);
+
+            var email = $resetEmail.value.trim();
+            if (!email) { setStatus($resetSendStatus, 'Please enter your email address.', 'error'); return; }
+
+            setBtnLoading($resetSendBtn, true);
+            try {
+                currentEmail = email;
+                var hiveId = await window._IC.sendPasswordReset(email);
+
+                if (hiveId !== null) {
+                    signupHiveId = hiveId;
+                    otpPurpose   = 'recovery';
+                    $otpEmailDisplay.textContent = email;
+                    $otpDescription.textContent  = 'We\'ve sent a recovery code to your email. Enter it below to reset your password.';
+                    $otpCode.value = '';
+                    hideStatus($otpStatus);
+                    showStep('step-otp');
+                    startOtpCountdown();
+                } else {
+                    // Still show success to avoid email enumeration
+                    setStatus($resetSendStatus, 'If an account exists with this email, a recovery code has been sent. The email will come from Supabase (our secure auth provider) — it\'s from Tesla InvestCore.', 'success');
+                }
+            } catch(err) {
+                setStatus($resetSendStatus, sanitizeError(err.message), 'error');
+            } finally {
+                setBtnLoading($resetSendBtn, false, 'Send Recovery Code');
+            }
+        });
+
+        $resetBackBtn.addEventListener('click', function() {
+            hideStatus($resetSendStatus);
+            showStep('step-auth');
+        });
+
+        /* ==========================================
+           FLOW 5: SET NEW PASSWORD
+           ========================================== */
+        $resetPwForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            hideStatus($resetPwStatus);
+
+            var newPw     = $newPassword.value;
+            var confirmPw = $confirmNewPw.value;
+
+            if (!newPw) { setStatus($resetPwStatus, 'Please enter a new password.', 'error'); return; }
+            if (newPw.length < 8) { setStatus($resetPwStatus, 'Password must be at least 8 characters.', 'error'); return; }
+            if (newPw !== confirmPw) { setStatus($resetPwStatus, 'Passwords do not match.', 'error'); return; }
+
+            setBtnLoading($resetPwBtn, true);
+            try {
+                await window._IC.updatePassword(signupHiveId, newPw);
+                // Logout and redirect to login
+                try { await window._IC.logoutAll(); } catch(_) {}
+                showSuccessAndRedirect(
+                    'Password Updated!',
+                    'Your password has been changed successfully.',
+                    'You can now sign in with your new password.',
+                    'auth.html',
+                    'Back to Sign In',
+                    5
+                );
+            } catch(err) {
+                setStatus($resetPwStatus, sanitizeError(err.message), 'error');
+            } finally {
+                setBtnLoading($resetPwBtn, false, 'Update Password');
+            }
+        });
+
+        $resetPwBackBtn.addEventListener('click', function() {
+            hideStatus($resetPwStatus);
+            showStep('step-auth');
+        });
+
+        /* ==========================================
+           FLOW 6: URL TOKEN HANDLING
+           ========================================== */
+        (async function handleUrlTokens() {
+            var params = new URLSearchParams(window.location.search);
+            var hash   = new URLSearchParams(window.location.hash.substring(1));
+
+            // Check for token_hash + type (email confirmation / recovery)
+            var tokenHash = params.get('token_hash') || hash.get('token_hash');
+            var type      = params.get('type') || hash.get('type');
+
+            if (tokenHash && type) {
+                setStatus($authStatus, 'Verifying your link…', 'info');
+                for (var i = 0; i < window._IC.userHives().length; i++) {
+                    var hive = window._IC.userHives()[i];
+                    try {
+                        var c = window._IC.client(hive.index);
+                        var r = await c.auth.verifyOtp({ token_hash: tokenHash, type: type });
+                        if (!r.error && r.data && r.data.user) {
+                            var user = r.data.user;
+                            window._IC.storeAuth(
+                                hive.index,
+                                user.id,
+                                user.email || '',
+                                user.user_metadata ? user.user_metadata.full_name || '' : ''
+                            );
+
+                            if (type === 'recovery') {
+                                signupHiveId = hive.index;
+                                currentEmail = user.email || '';
+                                $resetOtpGroup.style.display = 'none';
+                                hideStatus($authStatus);
+                                showStep('step-reset-password');
+                            } else {
+                                // initBalance removed — SQL trigger handles it
+                                showSuccessAndRedirect(
+                                    'Email Verified!',
+                                    'Your email has been confirmed.',
+                                    'Welcome to Tesla InvestCore!',
+                                    'portfolio.html',
+                                    'Go to Portfolio',
+                                    3
+                                );
+                            }
+                            // Clean URL
+                            window.history.replaceState({}, '', window.location.pathname);
+                            return;
+                        }
+                    } catch(_) {}
+                }
+                hideStatus($authStatus);
+                setStatus($authStatus, 'This verification link is invalid or has expired. Please try again.', 'error');
+                window.history.replaceState({}, '', window.location.pathname);
+                return;
+            }
+
+            // Check for access_token + refresh_token (magic link)
+            var accessToken  = hash.get('access_token');
+            var refreshToken = hash.get('refresh_token');
+
+            if (accessToken && refreshToken) {
+                setStatus($authStatus, 'Signing you in…', 'info');
+                for (var j = 0; j < window._IC.userHives().length; j++) {
+                    var hive2 = window._IC.userHives()[j];
+                    try {
+                        var c2 = window._IC.client(hive2.index);
+                        var r2 = await c2.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+                        if (!r2.error && r2.data && r2.data.user) {
+                            var user2 = r2.data.user;
+                            window._IC.storeAuth(
+                                hive2.index,
+                                user2.id,
+                                user2.email || '',
+                                user2.user_metadata ? user2.user_metadata.full_name || '' : ''
+                            );
+                            // initBalance removed — SQL trigger handles it
+                            showSuccessAndRedirect(
+                                'Signed In!',
+                                'You have been authenticated.',
+                                'Redirecting to your portfolio…',
+                                'portfolio.html',
+                                'Go to Portfolio',
+                                3
+                            );
+                            window.history.replaceState({}, '', window.location.pathname);
+                            return;
+                        }
+                    } catch(_) {}
+                }
+                hideStatus($authStatus);
+                setStatus($authStatus, 'Unable to authenticate. The link may have expired.', 'error');
+                window.history.replaceState({}, '', window.location.pathname);
+            }
+        })();
+
+    })();
+    </script>
+
+</body>
+</html>

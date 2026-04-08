@@ -1,0 +1,906 @@
+-- ============================================================
+-- INVESTCORE — COMPLETE SCHEMA (v4 — Withdrawals + KYC Images + Migration)
+-- Run on EACH hive (hive 0 through hive N)
+--
+-- ✅ Safe on a brand new Supabase project
+-- ✅ Safe on an existing project (drops & recreates cleanly)
+-- ✅ Includes Realtime, RLS, grants, indexes, triggers
+-- ✅ global_directory on Hive 0 maps users → hives
+-- ✅ AFTER INSERT trigger on auth.users auto-creates profiles + user_balances
+-- ✅ Strict RLS: users see only their own rows; admin@investcore.com has full access
+-- ✅ FIX: is_admin() helper function for reliable admin detection
+-- ✅ FIX: Explicit INSERT policies on trades & scheduled_trades for admin
+-- ✅ FIX: admin_insert_any policies to allow admin to insert for any user
+-- ✅ NEW: withdrawals table for tracking withdrawal requests
+-- ✅ NEW: KYC image columns (file_data_1/2/3) on kyc_submissions
+-- ✅ NEW: Safe migration block at the end (ALTER TABLE ADD COLUMN IF NOT EXISTS)
+--
+-- WARNING: Drops all tables. Back up first if needed.
+--
+-- TABLES (12):
+--   global_directory (Hive 0 only), profiles, user_balances, trades,
+--   scheduled_trades, deposits, withdrawals, reviews, review_likes,
+--   kyc_submissions, messages, logs
+-- ============================================================
+
+
+-- ============================================================
+-- STEP 1 — DROP EVERYTHING CLEANLY
+-- ============================================================
+
+DO $$
+BEGIN
+    BEGIN DROP TRIGGER IF EXISTS update_user_balances_timestamp ON user_balances; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP TRIGGER IF EXISTS update_profiles_timestamp      ON profiles;       EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP TRIGGER IF EXISTS on_auth_user_created           ON auth.users;     EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    BEGIN DROP FUNCTION IF EXISTS update_timestamp() CASCADE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP FUNCTION IF EXISTS handle_new_user()  CASCADE; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- Drop old permissive policies
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON profiles;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON logs;             EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- Drop new strict policies (idempotent re-run)
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON profiles;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON profiles;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON profiles;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_insert_any"   ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_insert_any"   ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_insert_any"   ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_insert_any"   ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON logs;             EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "anon_select"        ON global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "anon_insert"        ON global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "auth_select"        ON global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "auth_insert"        ON global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- Drop withdrawals policies
+    BEGIN DROP POLICY IF EXISTS "user_select_own"   ON withdrawals;      EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own"   ON withdrawals;      EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own"   ON withdrawals;      EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"          ON withdrawals;      EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "authenticated_full_access" ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- Drop the old is_admin helper function if it exists
+    BEGIN DROP FUNCTION IF EXISTS public.is_admin() CASCADE; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    -- Legacy policy names
+    BEGIN DROP POLICY IF EXISTS "Full access for authenticated users" ON user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "Full access for authenticated users" ON trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "Full access for authenticated users" ON deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "Full access for authenticated users" ON reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "Full access for authenticated users" ON logs;             EXCEPTION WHEN OTHERS THEN NULL; END;
+END $$;
+
+DROP TABLE IF EXISTS messages         CASCADE;
+DROP TABLE IF EXISTS kyc_submissions  CASCADE;
+DROP TABLE IF EXISTS review_likes     CASCADE;
+DROP TABLE IF EXISTS reviews          CASCADE;
+DROP TABLE IF EXISTS withdrawals      CASCADE;
+DROP TABLE IF EXISTS deposits         CASCADE;
+DROP TABLE IF EXISTS scheduled_trades CASCADE;
+DROP TABLE IF EXISTS trades           CASCADE;
+DROP TABLE IF EXISTS user_balances    CASCADE;
+DROP TABLE IF EXISTS logs             CASCADE;
+DROP TABLE IF EXISTS profiles         CASCADE;
+DROP TABLE IF EXISTS global_directory CASCADE;
+
+
+-- ============================================================
+-- STEP 2 — CREATE TABLES
+-- ============================================================
+
+-- global_directory (Hive 0 ONLY — single source of truth for email→hive mapping)
+-- On user hives this table will exist but remain empty.
+CREATE TABLE global_directory (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    email      TEXT        UNIQUE NOT NULL,
+    hive_id    INTEGER     NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- profiles
+CREATE TABLE profiles (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       TEXT        UNIQUE NOT NULL,
+    full_name     TEXT        NOT NULL DEFAULT '',
+    phone         TEXT        NOT NULL DEFAULT '',
+    country       TEXT        NOT NULL DEFAULT '',
+    date_of_birth TEXT        NOT NULL DEFAULT '',
+    email         TEXT        NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- user_balances
+CREATE TABLE user_balances (
+    id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       TEXT          UNIQUE NOT NULL,
+    balance       DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+    has_deposited BOOLEAN       NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- trades
+CREATE TABLE trades (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      TEXT          NOT NULL,
+    symbol       TEXT          NOT NULL,
+    display_name TEXT,
+    trade_type   TEXT          NOT NULL,
+    volume       DECIMAL(15,4),
+    entry_price  DECIMAL(15,6),
+    close_price  DECIMAL(15,6),
+    profit_loss  DECIMAL(15,2),
+    ai_note      TEXT,
+    status       TEXT          NOT NULL DEFAULT 'executed',
+    executed_at  TIMESTAMPTZ,
+    opened_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    closed_at    TIMESTAMPTZ,
+    scheduled_at TIMESTAMPTZ,
+    origin_global_id UUID,          -- references the GLOBAL scheduled_trade this was derived from (dedup key)
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- scheduled_trades
+CREATE TABLE scheduled_trades (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      TEXT          NOT NULL,
+    symbol       TEXT          NOT NULL,
+    display_name TEXT,
+    trade_type   TEXT          NOT NULL DEFAULT 'buy',
+    volume       DECIMAL(15,4) NOT NULL DEFAULT 0.01,
+    entry_price  DECIMAL(15,6),
+    close_price  DECIMAL(15,6),
+    profit_loss  DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+    ai_note      TEXT,
+    status       TEXT          NOT NULL DEFAULT 'pending',
+    scheduled_at TIMESTAMPTZ   NOT NULL,
+    executed_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- deposits
+CREATE TABLE deposits (
+    id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      TEXT          NOT NULL,
+    amount       DECIMAL(15,2) NOT NULL,
+    method       TEXT          NOT NULL DEFAULT '',
+    proof_data   TEXT,
+    proof_text   TEXT          NOT NULL DEFAULT '',
+    cloud_ref    TEXT,
+    cloud_url    TEXT,
+    backed_up_at TIMESTAMPTZ,
+    status       TEXT          NOT NULL DEFAULT 'pending',
+    confirmed    BOOLEAN       NOT NULL DEFAULT FALSE,
+    approved_at  TIMESTAMPTZ,
+    rejected_at  TIMESTAMPTZ,
+    submitted_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- reviews
+CREATE TABLE reviews (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       TEXT        NOT NULL,
+    name          TEXT,
+    text          TEXT,
+    rating        INTEGER     CHECK (rating >= 1 AND rating <= 5),
+    approved      BOOLEAN     NOT NULL DEFAULT FALSE,
+    reply         TEXT,
+    helpful_count INTEGER     NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- review_likes
+CREATE TABLE review_likes (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    review_id  UUID        NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    user_id    TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (review_id, user_id)
+);
+
+-- withdrawals
+CREATE TABLE withdrawals (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        TEXT          NOT NULL,
+    amount         DECIMAL(15,2) NOT NULL,
+    method         TEXT          NOT NULL DEFAULT '',
+    wallet_address TEXT          NOT NULL DEFAULT '',
+    status         TEXT          NOT NULL DEFAULT 'pending',
+    submitted_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- kyc_submissions
+CREATE TABLE kyc_submissions (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       TEXT        NOT NULL,
+    document_type TEXT        NOT NULL,
+    file_data_1   TEXT,
+    file_data_2   TEXT,
+    file_data_3   TEXT,
+    status        TEXT        NOT NULL DEFAULT 'pending',
+    submitted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    verify_at     TIMESTAMPTZ NOT NULL,
+    verified_at   TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id)
+);
+
+-- messages
+CREATE TABLE messages (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       TEXT        NOT NULL,
+    user_name     TEXT        NOT NULL DEFAULT '',
+    content       TEXT        NOT NULL DEFAULT '',
+    image_data    TEXT,
+    sender        TEXT        NOT NULL DEFAULT 'user',
+    read_by_admin BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- logs
+CREATE TABLE logs (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    message    TEXT        NOT NULL,
+    level      TEXT        NOT NULL DEFAULT 'info',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+-- ============================================================
+-- STEP 3 — INDEXES
+-- ============================================================
+
+CREATE INDEX idx_global_directory_email   ON global_directory(email);
+CREATE INDEX idx_global_directory_hive_id ON global_directory(hive_id);
+
+CREATE INDEX idx_profiles_user_id        ON profiles(user_id);
+
+CREATE INDEX idx_user_balances_user_id   ON user_balances(user_id);
+
+CREATE INDEX idx_trades_user_id          ON trades(user_id);
+CREATE INDEX idx_trades_status           ON trades(status);
+CREATE INDEX idx_trades_closed_at        ON trades(closed_at DESC NULLS LAST);
+CREATE INDEX idx_trades_user_status      ON trades(user_id, status);
+
+CREATE INDEX idx_sched_user_id           ON scheduled_trades(user_id);
+CREATE INDEX idx_sched_status            ON scheduled_trades(status);
+CREATE INDEX idx_sched_user_pending      ON scheduled_trades(user_id, status, scheduled_at);
+
+CREATE INDEX idx_deposits_user_id        ON deposits(user_id);
+CREATE INDEX idx_deposits_status         ON deposits(status);
+CREATE INDEX idx_deposits_not_backed_up  ON deposits(backed_up_at) WHERE backed_up_at IS NULL;
+
+CREATE INDEX idx_reviews_user_id         ON reviews(user_id);
+CREATE INDEX idx_reviews_approved        ON reviews(approved);
+
+CREATE INDEX idx_review_likes_review_id  ON review_likes(review_id);
+CREATE INDEX idx_review_likes_user_id    ON review_likes(user_id);
+
+CREATE INDEX idx_withdrawals_user_id     ON withdrawals(user_id);
+CREATE INDEX idx_withdrawals_status      ON withdrawals(status);
+
+CREATE INDEX idx_kyc_user_id             ON kyc_submissions(user_id);
+CREATE INDEX idx_kyc_status              ON kyc_submissions(status);
+CREATE INDEX idx_kyc_verify_at           ON kyc_submissions(verify_at);
+
+CREATE INDEX idx_messages_user_id        ON messages(user_id);
+CREATE INDEX idx_messages_sender         ON messages(sender);
+CREATE INDEX idx_messages_created_at     ON messages(created_at DESC);
+CREATE INDEX idx_messages_unread         ON messages(read_by_admin) WHERE read_by_admin = FALSE;
+
+CREATE INDEX idx_logs_created_at         ON logs(created_at DESC);
+
+
+-- ============================================================
+-- STEP 4 — AUTO-UPDATE updated_at TRIGGERS
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_user_balances_timestamp
+    BEFORE UPDATE ON user_balances
+    FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+
+CREATE TRIGGER update_profiles_timestamp
+    BEFORE UPDATE ON profiles
+    FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+
+CREATE TRIGGER update_withdrawals_timestamp
+    BEFORE UPDATE ON withdrawals
+    FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+
+
+-- ============================================================
+-- STEP 4b — AFTER INSERT ON auth.users → auto-create profile + balance
+-- When a new user signs up, the database automatically creates:
+--   1. A row in user_balances (balance 0.00)
+--   2. A row in profiles (with email from auth metadata)
+-- This eliminates the need for the frontend to INSERT these rows.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Create user_balances row with zero balance
+    INSERT INTO public.user_balances (user_id, balance, has_deposited)
+    VALUES (NEW.id::text, 0.00, false)
+    ON CONFLICT (user_id) DO NOTHING;
+
+    -- Create profiles row with email and optional full_name from metadata
+    INSERT INTO public.profiles (user_id, email, full_name)
+    VALUES (
+        NEW.id::text,
+        COALESCE(NEW.email, ''),
+        COALESCE(NEW.raw_user_meta_data ->> 'full_name', '')
+    )
+    ON CONFLICT (user_id) DO NOTHING;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+
+-- ============================================================
+-- STEP 5 — ROW LEVEL SECURITY (ENABLE)
+-- ============================================================
+
+ALTER TABLE global_directory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE profiles         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_balances    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trades           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE scheduled_trades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deposits         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE withdrawals      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reviews          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE review_likes     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kyc_submissions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE logs             ENABLE ROW LEVEL SECURITY;
+
+
+-- ============================================================
+-- STEP 6 — GRANTS
+-- ============================================================
+
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT USAGE ON SCHEMA public TO anon;
+
+
+-- global_directory: anon + authenticated can SELECT and INSERT
+-- (needed for signup/login lookup before user is authenticated)
+GRANT SELECT, INSERT ON global_directory TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON global_directory TO authenticated;
+
+GRANT ALL ON profiles         TO authenticated;
+GRANT ALL ON user_balances    TO authenticated;
+GRANT ALL ON trades           TO authenticated;
+GRANT ALL ON scheduled_trades TO authenticated;
+GRANT ALL ON deposits         TO authenticated;
+GRANT ALL ON withdrawals      TO authenticated;
+GRANT ALL ON reviews          TO authenticated;
+GRANT ALL ON review_likes     TO authenticated;
+GRANT ALL ON kyc_submissions  TO authenticated;
+GRANT ALL ON messages         TO authenticated;
+GRANT ALL ON logs             TO authenticated;
+
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon;
+
+
+-- ============================================================
+-- STEP 7 — STRICT RLS POLICIES
+--
+-- RULE: Normal users can only SELECT/UPDATE their own rows (user_id = auth.uid()::text).
+-- ADMIN OVERRIDE: admin@investcore.com gets full ALL access on every table.
+-- For tables where users also need INSERT (reviews, review_likes, kyc, messages),
+-- an additional INSERT policy scoped to their own user_id is added.
+-- ============================================================
+
+-- ── Helper: is the current JWT from the admin? ──
+-- Checks MULTIPLE locations in the JWT for the admin email.
+-- This is the KEY FIX: Supabase stores email in different JWT claims
+-- depending on the auth provider and version. We check all of them.
+-- The function is SECURITY DEFINER so it runs with elevated privileges
+-- and can reliably read auth.jwt() regardless of RLS context.
+-- ─────────────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN (
+        -- Primary: top-level email claim (standard Supabase JWT)
+        COALESCE(auth.jwt() ->> 'email', '') = 'admin@investcore.com'
+        OR
+        -- Fallback 1: email inside user_metadata (some Supabase versions)
+        COALESCE(auth.jwt() -> 'user_metadata' ->> 'email', '') = 'admin@investcore.com'
+        OR
+        -- Fallback 2: email inside app_metadata
+        COALESCE(auth.jwt() -> 'app_metadata' ->> 'email', '') = 'admin@investcore.com'
+    );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+-- Grant execute on is_admin() so RLS policies can call it
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO anon;
+
+-- ─────────────────────────────────────────────────
+-- global_directory — open SELECT/INSERT for anon + authenticated
+-- Admin gets full ALL access (including DELETE for cleanup)
+-- ─────────────────────────────────────────────────
+CREATE POLICY "anon_select" ON global_directory
+    FOR SELECT TO anon USING (true);
+
+CREATE POLICY "anon_insert" ON global_directory
+    FOR INSERT TO anon WITH CHECK (true);
+
+CREATE POLICY "auth_select" ON global_directory
+    FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "auth_insert" ON global_directory
+    FOR INSERT TO authenticated WITH CHECK (true);
+
+CREATE POLICY "admin_all" ON global_directory
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- profiles
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON profiles
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON profiles
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON profiles
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- user_balances
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON user_balances
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON user_balances
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+-- Admin can INSERT user_balances for any user (clientForUser fallback)
+CREATE POLICY "admin_insert_any" ON user_balances
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON user_balances
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- trades
+-- FIX: Added explicit admin_insert_any policy so admin can INSERT
+-- trades for ANY user_id (not just their own). The admin_all FOR ALL
+-- policy alone was failing because Supabase JWT email claim was not
+-- always found at auth.jwt()->>'email'. The is_admin() helper checks
+-- multiple JWT locations for reliable admin detection.
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON trades
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON trades
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+-- Users can INSERT their own trades; admin can insert for any user
+CREATE POLICY "user_insert_own" ON trades
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+-- KEY FIX: Explicit INSERT policy for admin to insert trades for any user
+CREATE POLICY "admin_insert_any" ON trades
+    FOR INSERT TO authenticated
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "admin_all" ON trades
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- scheduled_trades
+-- FIX: Same as trades — added explicit admin_insert_any policy.
+-- This fixes "Scheduled trade DB save failed" errors.
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON scheduled_trades
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON scheduled_trades
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+-- Users can INSERT their own scheduled trades; admin can insert for any user
+CREATE POLICY "user_insert_own" ON scheduled_trades
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+-- KEY FIX: Explicit INSERT policy for admin to insert scheduled trades for any user
+CREATE POLICY "admin_insert_any" ON scheduled_trades
+    FOR INSERT TO authenticated
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "admin_all" ON scheduled_trades
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- withdrawals
+-- Users need INSERT to submit withdrawals
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON withdrawals
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON withdrawals
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON withdrawals
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON withdrawals
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- deposits
+-- Users need INSERT to submit deposits
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON deposits
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON deposits
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON deposits
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON deposits
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- reviews
+-- Users need INSERT to submit reviews
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON reviews
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON reviews
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON reviews
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON reviews
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- review_likes
+-- Users need INSERT to like reviews
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON review_likes
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON review_likes
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON review_likes
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON review_likes
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- kyc_submissions
+-- Users need INSERT to submit KYC
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON kyc_submissions
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON kyc_submissions
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON kyc_submissions
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON kyc_submissions
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- messages
+-- Users need INSERT to send messages
+-- ─────────────────────────────────────────────────
+CREATE POLICY "user_select_own" ON messages
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_update_own" ON messages
+    FOR UPDATE TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin())
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "user_insert_own" ON messages
+    FOR INSERT TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "admin_all" ON messages
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- ─────────────────────────────────────────────────
+-- logs — admin-only table
+-- ─────────────────────────────────────────────────
+CREATE POLICY "admin_all" ON logs
+    FOR ALL TO authenticated
+    USING  (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+
+-- ============================================================
+-- STEP 8 — REALTIME
+-- ============================================================
+
+ALTER TABLE global_directory REPLICA IDENTITY FULL;
+ALTER TABLE user_balances    REPLICA IDENTITY FULL;
+ALTER TABLE trades           REPLICA IDENTITY FULL;
+ALTER TABLE scheduled_trades REPLICA IDENTITY FULL;
+ALTER TABLE deposits         REPLICA IDENTITY FULL;
+ALTER TABLE withdrawals      REPLICA IDENTITY FULL;
+ALTER TABLE profiles         REPLICA IDENTITY FULL;
+ALTER TABLE reviews          REPLICA IDENTITY FULL;
+ALTER TABLE review_likes     REPLICA IDENTITY FULL;
+ALTER TABLE kyc_submissions  REPLICA IDENTITY FULL;
+ALTER TABLE messages         REPLICA IDENTITY FULL;
+ALTER TABLE logs             REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE global_directory; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE user_balances;    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE trades;           EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE scheduled_trades; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE deposits;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE withdrawals;      EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE profiles;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE reviews;          EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE review_likes;     EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE kyc_submissions;  EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE messages;         EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE logs;             EXCEPTION WHEN OTHERS THEN NULL; END;
+END $$;
+
+
+-- ============================================================
+-- STEP 9 — VERIFY
+-- ============================================================
+
+-- Should return 12 tables
+SELECT tablename FROM pg_tables
+WHERE schemaname = 'public' ORDER BY tablename;
+
+-- Should return multiple policies (strict per-table)
+SELECT tablename, policyname FROM pg_policies
+WHERE schemaname = 'public' ORDER BY tablename, policyname;
+
+-- Should return 12 tables in realtime publication
+SELECT pubname, tablename FROM pg_publication_tables
+WHERE pubname = 'supabase_realtime' ORDER BY tablename;
+
+-- Verify the auto-user trigger exists
+SELECT tgname, tgrelid::regclass FROM pg_trigger
+WHERE tgname = 'on_auth_user_created';
+
+-- Check global_directory columns
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'global_directory' ORDER BY ordinal_position;
+
+-- Check deposits columns
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'deposits' ORDER BY ordinal_position;
+
+-- Check messages columns
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'messages' ORDER BY ordinal_position;
+
+-- Check kyc_submissions columns
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'kyc_submissions' ORDER BY ordinal_position;
+
+-- Check withdrawals columns
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'withdrawals' ORDER BY ordinal_position;
+
+
+-- ============================================================
+-- SAFE MIGRATION BLOCK — Apply to EXISTING databases
+-- ============================================================
+-- This block uses IF NOT EXISTS / ADD COLUMN IF NOT EXISTS so it
+-- can be run safely on an existing project without dropping tables.
+-- Run this INSTEAD of the full drop-and-recreate if you want to
+-- preserve existing data.
+-- ============================================================
+
+-- 1. Create withdrawals table if it doesn't exist
+CREATE TABLE IF NOT EXISTS withdrawals (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        TEXT          NOT NULL,
+    amount         DECIMAL(15,2) NOT NULL,
+    method         TEXT          NOT NULL DEFAULT '',
+    wallet_address TEXT          NOT NULL DEFAULT '',
+    status         TEXT          NOT NULL DEFAULT 'pending',
+    submitted_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- 2. Add KYC image columns if they don't exist
+ALTER TABLE kyc_submissions ADD COLUMN IF NOT EXISTS file_data_1 TEXT;
+ALTER TABLE kyc_submissions ADD COLUMN IF NOT EXISTS file_data_2 TEXT;
+ALTER TABLE kyc_submissions ADD COLUMN IF NOT EXISTS file_data_3 TEXT;
+
+-- 3. Indexes for withdrawals (safe — CREATE INDEX IF NOT EXISTS)
+CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_status  ON withdrawals(status);
+
+-- 4. Enable RLS on withdrawals
+ALTER TABLE withdrawals ENABLE ROW LEVEL SECURITY;
+
+-- 5. Grants for withdrawals
+GRANT ALL ON withdrawals TO authenticated;
+
+-- 6. RLS policies for withdrawals (safe — uses IF NOT EXISTS pattern)
+DO $$
+BEGIN
+    -- Drop and recreate to ensure correct definitions
+    BEGIN DROP POLICY IF EXISTS "user_select_own" ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_update_own" ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "user_insert_own" ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN DROP POLICY IF EXISTS "admin_all"       ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+    CREATE POLICY "user_select_own" ON withdrawals
+        FOR SELECT TO authenticated
+        USING (user_id = auth.uid()::text OR public.is_admin());
+
+    CREATE POLICY "user_update_own" ON withdrawals
+        FOR UPDATE TO authenticated
+        USING (user_id = auth.uid()::text OR public.is_admin())
+        WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+    CREATE POLICY "user_insert_own" ON withdrawals
+        FOR INSERT TO authenticated
+        WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+    CREATE POLICY "admin_all" ON withdrawals
+        FOR ALL TO authenticated
+        USING  (public.is_admin())
+        WITH CHECK (public.is_admin());
+END $$;
+
+-- 7. Auto-update updated_at trigger for withdrawals
+DO $$
+BEGIN
+    BEGIN DROP TRIGGER IF EXISTS update_withdrawals_timestamp ON withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+    CREATE TRIGGER update_withdrawals_timestamp
+        BEFORE UPDATE ON withdrawals
+        FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+END $$;
+
+-- 8. Realtime for withdrawals
+ALTER TABLE withdrawals REPLICA IDENTITY FULL;
+DO $$
+BEGIN
+    BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE withdrawals; EXCEPTION WHEN OTHERS THEN NULL; END;
+END $$;
+
+-- Migration complete — verify
+SELECT 'MIGRATION OK: withdrawals table' AS status
+FROM pg_tables WHERE schemaname = 'public' AND tablename = 'withdrawals';
+
+SELECT 'MIGRATION OK: kyc file_data columns' AS status
+FROM information_schema.columns
+WHERE table_name = 'kyc_submissions' AND column_name = 'file_data_1';

@@ -1,0 +1,1483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="About Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Learn about our mission, team, and how we democratize investing through artificial intelligence.">
+    <meta name="theme-color" content="#0f172a">
+    <title>About Us — Tesla InvestCore</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+// ─── Tesla InvestCore: load hives from config.txt, no config.js needed ───────────
+(function () {
+    var _hives = [], _clients = {};
+
+    // Load config.txt synchronously so hive data is ready before any script runs
+    try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'config.txt', false);
+        xhr.send();
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            if (data && Array.isArray(data.hives)) _hives = data.hives;
+        }
+    } catch (e) { console.error('[IC] config.txt load failed:', e); }
+
+    function _client(index) {
+        if (_clients[index]) return _clients[index];
+        var h = _hives[index];
+        if (!h) throw new Error('No hive config for index ' + index);
+        _clients[index] = window.supabase.createClient(h.url, h.anonKey, {
+            auth: { persistSession: true, autoRefreshToken: true,
+                    detectSessionInUrl: true, storageKey: 'investcore-sb-auth-' + index }
+        });
+        return _clients[index];
+    }
+
+    function getStoredHiveId() {
+        var v = Number(localStorage.getItem('investcore_hiveId'));
+        return Number.isFinite(v) && v >= 0 ? v : null;
+    }
+
+    function storeAuthContext(p) {
+        if (p.hiveId !== undefined) localStorage.setItem('investcore_hiveId', String(p.hiveId));
+        if (p.userId)   localStorage.setItem('investcore_userId',    p.userId);
+        if (p.email)    localStorage.setItem('investcore_userEmail', p.email);
+        if (p.fullName) localStorage.setItem('investcore_fullName',  p.fullName);
+    }
+
+    function clearAuthContext() {
+        ['investcore_hiveId','investcore_userId','investcore_userEmail','investcore_fullName']
+            .forEach(function(k) { localStorage.removeItem(k); });
+    }
+
+    function getUserHives() { return _hives.filter(function(h) { return h.role === 'user'; }); }
+
+    function getAllHiveClients() {
+        return _hives.map(function(h) {
+            try { return _client(h.index); } catch(e) { return null; }
+        }).filter(Boolean);
+    }
+
+    function getClient(opts) {
+        var o = opts || {};
+        if (o.admin) return _client(0);
+        if (typeof o.hiveId === 'number') return _client(o.hiveId);
+        var s = getStoredHiveId();
+        return s !== null ? _client(s) : _client(_hives.length > 1 ? 1 : 0);
+    }
+
+    async function safeGetCurrentUser(client) {
+        try {
+            var r = await client.auth.getUser();
+            return r && r.data ? r.data.user || null : null;
+        } catch(e) { return null; }
+    }
+
+    async function getCurrentUserAcrossHives() {
+        var storedHiveId = getStoredHiveId();
+
+        // 1. Priority Check: Verify the hive the user was ALREADY using (from localStorage)
+        if (storedHiveId !== null) {
+            var currentClient = _client(storedHiveId);
+            var user = await safeGetCurrentUser(currentClient);
+            if (user) {
+                storeAuthContext({ hiveId: storedHiveId, userId: user.id,
+                    email: user.email || '',
+                    fullName: user.user_metadata ? user.user_metadata.full_name || '' : '' });
+                return { hiveId: storedHiveId, client: currentClient, user: user };
+            }
+        }
+
+        // 2. Fallback: Query global_directory on Hive 0 to find the user's hive.
+        //    We need the user's email from localStorage to look them up.
+        var storedEmail = localStorage.getItem('investcore_userEmail');
+        if (storedEmail) {
+            try {
+                var hive0 = _client(0);
+                var dirResult = await hive0.from('global_directory')
+                    .select('hive_id')
+                    .eq('email', storedEmail.toLowerCase().trim())
+                    .maybeSingle();
+                if (!dirResult.error && dirResult.data) {
+                    var targetHiveId = dirResult.data.hive_id;
+                    var targetClient = _client(targetHiveId);
+                    var targetUser = await safeGetCurrentUser(targetClient);
+                    if (targetUser) {
+                        storeAuthContext({ hiveId: targetHiveId, userId: targetUser.id,
+                            email: targetUser.email || '',
+                            fullName: targetUser.user_metadata ? targetUser.user_metadata.full_name || '' : '' });
+                        return { hiveId: targetHiveId, client: targetClient, user: targetUser };
+                    }
+                }
+            } catch(e) {
+                console.warn('[IC] global_directory fallback failed:', e);
+            }
+        }
+
+        return null;
+    }
+
+    async function logoutAll() {
+        var jobs = _hives.map(function(h) {
+            try { return _client(h.index).auth.signOut(); } catch(e) { return Promise.resolve(); }
+        });
+        await Promise.allSettled(jobs);
+        clearAuthContext();
+    }
+
+    async function fetchApprovedReviewsAcrossHives() {
+        var results = [];
+        var userHives = getUserHives();
+        for (var i = 0; i < userHives.length; i++) {
+            var idx = userHives[i].index;
+            try {
+                var r = await _client(idx).from('reviews').select('*').eq('approved', true)
+                    .order('created_at', { ascending: false });
+                if (!r.error && Array.isArray(r.data))
+                    r.data.forEach(function(item) { results.push(Object.assign({}, item, { hiveId: idx })); });
+            } catch(e) {}
+        }
+        return results;
+    }
+
+    async function fetchPendingReviewsAcrossHives() {
+        var results = [];
+        var userHives = getUserHives();
+        for (var i = 0; i < userHives.length; i++) {
+            var idx = userHives[i].index;
+            try {
+                var r = await _client(idx).from('reviews').select('*').eq('approved', false)
+                    .order('created_at', { ascending: false });
+                if (!r.error && Array.isArray(r.data))
+                    r.data.forEach(function(item) { results.push(Object.assign({}, item, { hiveId: idx })); });
+            } catch(e) {}
+        }
+        return results;
+    }
+
+    window.InvestCoreSupabase = {
+        hiveConfigs: _hives,
+        getHiveConfig: function(i) { return _hives[i] || null; },
+        getUserHives: getUserHives,
+        getAllHiveClients: getAllHiveClients,
+        getClient: getClient,
+        getStoredHiveId: getStoredHiveId,
+        storeAuthContext: storeAuthContext,
+        clearAuthContext: clearAuthContext,
+        safeGetCurrentUser: safeGetCurrentUser,
+        getCurrentUserAcrossHives: getCurrentUserAcrossHives,
+        logoutAll: logoutAll,
+        fetchApprovedReviewsAcrossHives: fetchApprovedReviewsAcrossHives,
+        fetchPendingReviewsAcrossHives: fetchPendingReviewsAcrossHives
+    };
+})();
+</script>
+    <style>
+        /* ============================================
+           DESIGN SYSTEM — CSS VARIABLES
+           ============================================ */
+        :root {
+            /* Colors — Dark Mode (Default) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #0b1120;
+            --bg-card: #162032;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --color-primary: #ef4444;
+            --color-primary-hover: #dc2626;
+            --color-primary-glow: rgba(239, 68, 68, 0.15);
+            --color-accent: #f87171;
+            --color-accent-hover: #ef4444;
+            --color-accent-glow: rgba(248, 113, 113, 0.12);
+            --color-error: #7f1d1d;
+            --color-warning: #f59e0b;
+            --border-color: rgba(239, 68, 68, 0.12);
+            --border-color-hover: rgba(239, 68, 68, 0.3);
+
+            /* Spacing */
+            --space-xs: 8px;
+            --space-sm: 16px;
+            --space-md: 24px;
+            --space-lg: 32px;
+            --space-xl: 48px;
+            --space-2xl: 64px;
+            --space-3xl: 96px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+            --font-size-xs: 0.75rem;
+            --font-size-sm: 0.875rem;
+            --font-size-base: 1rem;
+            --font-size-lg: 1.125rem;
+            --font-size-xl: 1.25rem;
+            --font-size-2xl: 1.5rem;
+            --font-size-3xl: 2rem;
+            --font-size-4xl: 2.75rem;
+            --font-size-5xl: 3.5rem;
+            --font-weight-normal: 400;
+            --font-weight-medium: 500;
+            --font-weight-semibold: 600;
+            --font-weight-bold: 700;
+
+            /* Borders & Shadows */
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --radius-xl: 24px;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.35);
+            --shadow-lg: 0 8px 32px rgba(0,0,0,0.4);
+            --shadow-card: 0 4px 24px rgba(0,0,0,0.3), 0 1px 4px rgba(239,68,68,0.06);
+
+            /* Transitions */
+            --transition-fast: 150ms ease;
+            --transition-base: 250ms ease;
+            --transition-slow: 400ms ease;
+
+            /* Layout */
+            --container-max: 1200px;
+            --nav-height: 72px;
+        }
+
+        /* Light mode override */
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg-primary: #ffffff;
+                --bg-secondary: #f8fafc;
+                --bg-tertiary: #f1f5f9;
+                --bg-card: #ffffff;
+                --text-primary: #1e293b;
+                --text-secondary: #475569;
+                --text-muted: #94a3b8;
+                --color-primary: #dc2626;
+                --color-primary-hover: #b91c1c;
+                --color-primary-glow: rgba(220, 38, 38, 0.1);
+                --color-accent: #e11d48;
+                --color-accent-hover: #be123c;
+                --color-accent-glow: rgba(225, 29, 72, 0.1);
+                --border-color: rgba(220, 38, 38, 0.1);
+                --border-color-hover: rgba(220, 38, 38, 0.25);
+                --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+                --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+                --shadow-lg: 0 8px 32px rgba(0,0,0,0.1);
+                --shadow-card: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(220,38,38,0.04);
+            }
+        }
+
+        /* ============================================
+           RESET & BASE
+           ============================================ */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-weight: var(--font-weight-normal);
+            font-size: var(--font-size-base);
+            line-height: 1.65;
+            color: var(--text-primary);
+            background-color: var(--bg-primary);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        a {
+            color: var(--color-primary);
+            text-decoration: none;
+            transition: color var(--transition-fast);
+        }
+
+        a:hover {
+            color: var(--color-primary-hover);
+        }
+
+        h1, h2, h3, h4, h5, h6 {
+            font-weight: var(--font-weight-semibold);
+            line-height: 1.25;
+            color: var(--text-primary);
+        }
+
+        /* ============================================
+           LAYOUT UTILITIES
+           ============================================ */
+        .container {
+            width: 100%;
+            max-width: var(--container-max);
+            margin-left: auto;
+            margin-right: auto;
+            padding-left: var(--space-md);
+            padding-right: var(--space-md);
+        }
+
+        .section {
+            padding-top: var(--space-3xl);
+            padding-bottom: var(--space-3xl);
+        }
+
+        .section-alt {
+            background-color: var(--bg-secondary);
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: var(--space-2xl);
+        }
+
+        .section-header h2 {
+            font-size: var(--font-size-3xl);
+            margin-bottom: var(--space-sm);
+        }
+
+        .section-header p {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            max-width: 640px;
+            margin: 0 auto;
+        }
+
+        .section-label {
+            display: inline-block;
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--color-primary);
+            margin-bottom: var(--space-xs);
+        }
+
+        .highlight {
+            color: var(--color-primary);
+        }
+
+        /* ============================================
+           NAVIGATION
+           ============================================ */
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: var(--nav-height);
+            background: rgba(15, 23, 42, 0.92);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-color);
+            z-index: 1000;
+            transition: border-color var(--transition-base);
+        }
+
+        @media (prefers-color-scheme: light) {
+            .nav {
+                background: rgba(255, 255, 255, 0.92);
+            }
+        }
+
+        .nav-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 100%;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
+            flex-shrink: 0;
+        }
+
+        .nav-brand:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-brand img {
+            height: 42px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .nav-brand span {
+            font-size: var(--font-size-xl);
+            font-weight: var(--font-weight-bold);
+            letter-spacing: -0.5px;
+        }
+
+        .brand-gradient {
+            background: linear-gradient(135deg, var(--color-primary), #e11d48, #be123c);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: var(--font-weight-bold);
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            padding: 6px 4px;
+            transition: color var(--transition-fast);
+            position: relative;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--color-primary);
+            border-radius: 1px;
+            transition: width var(--transition-base);
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        .nav-register {
+            padding: 8px 20px !important;
+            background: var(--color-primary) !important;
+            color: #ffffff !important;
+            border-radius: var(--radius-md) !important;
+            font-weight: var(--font-weight-medium) !important;
+        }
+
+        .nav-register::after {
+            display: none !important;
+        }
+
+        .nav-register:hover {
+            background: var(--color-primary-hover) !important;
+            box-shadow: 0 4px 16px rgba(239,68,68,0.3);
+        }
+
+        /* Mobile toggle */
+        .nav-toggle {
+            display: none;
+            flex-direction: column;
+            gap: 5px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 8px;
+            z-index: 1001;
+        }
+
+        .nav-toggle span {
+            width: 24px;
+            height: 2px;
+            background: var(--text-primary);
+            border-radius: 2px;
+            transition: all var(--transition-base);
+        }
+
+        .nav-toggle.active span:nth-child(1) {
+            transform: rotate(45deg) translate(5px, 5px);
+        }
+
+        .nav-toggle.active span:nth-child(2) {
+            opacity: 0;
+        }
+
+        .nav-toggle.active span:nth-child(3) {
+            transform: rotate(-45deg) translate(5px, -5px);
+        }
+
+        /* ============================================
+           HERO SECTION
+           ============================================ */
+        .hero {
+            position: relative;
+            min-height: 420px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding-top: calc(var(--nav-height) + var(--space-3xl));
+            padding-bottom: var(--space-3xl);
+            overflow: hidden;
+        }
+
+        .hero-bg {
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(ellipse at 50% 0%, rgba(239,68,68,0.08) 0%, transparent 60%),
+                        radial-gradient(ellipse at 80% 100%, rgba(239,68,68,0.04) 0%, transparent 50%);
+            z-index: 0;
+        }
+
+        .hero-grid {
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(239,68,68,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(239,68,68,0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            z-index: 0;
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-sub {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        /* ============================================
+           BUTTONS
+           ============================================ */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 28px;
+            font-family: var(--font-family);
+            font-size: var(--font-size-base);
+            font-weight: var(--font-weight-medium);
+            line-height: 1.4;
+            border: 2px solid transparent;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all var(--transition-base);
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: var(--color-primary);
+            color: #ffffff;
+            border-color: var(--color-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--color-primary-hover);
+            border-color: var(--color-primary-hover);
+            color: #ffffff;
+            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.35);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-primary);
+            border-color: var(--border-color-hover);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--color-primary);
+            color: var(--color-primary);
+            background: var(--color-primary-glow);
+            transform: translateY(-1px);
+        }
+
+        /* ============================================
+           MISSION SECTION
+           ============================================ */
+        .mission-text {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            max-width: 800px;
+            margin: 0 auto;
+            text-align: center;
+            line-height: 1.8;
+        }
+
+        /* ============================================
+           HOW IT WORKS — STEPS
+           ============================================ */
+        .steps-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: var(--space-lg);
+        }
+
+        .step-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: var(--space-lg);
+            text-align: center;
+            position: relative;
+            transition: all var(--transition-base);
+        }
+
+        .step-card:hover {
+            border-color: var(--border-color-hover);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-card);
+        }
+
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: var(--color-primary-glow);
+            color: var(--color-primary);
+            font-size: var(--font-size-xl);
+            font-weight: var(--font-weight-bold);
+            margin-bottom: var(--space-sm);
+        }
+
+        .step-card h3 {
+            font-size: var(--font-size-xl);
+            margin-bottom: var(--space-xs);
+        }
+
+        .step-card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            line-height: 1.7;
+        }
+
+        .step-icon {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto var(--space-sm);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .step-icon svg {
+            width: 28px;
+            height: 28px;
+            stroke-width: 1.5;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Connector arrows between steps */
+        .step-connector {
+            display: none;
+        }
+
+        @media (min-width: 769px) {
+            .steps-grid {
+                position: relative;
+            }
+
+            .step-connector {
+                display: block;
+                position: absolute;
+                top: 50%;
+                transform: translateY(-50%);
+                color: var(--color-primary);
+                opacity: 0.4;
+                font-size: 24px;
+            }
+
+            .step-connector-1 {
+                left: calc(33.33% - 12px);
+            }
+
+            .step-connector-2 {
+                left: calc(66.66% - 12px);
+            }
+        }
+
+        /* ============================================
+           ASSET CLASSES
+           ============================================ */
+        .assets-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: var(--space-md);
+        }
+
+        .asset-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: var(--space-lg) var(--space-md);
+            text-align: center;
+            transition: all var(--transition-base);
+        }
+
+        .asset-card:hover {
+            border-color: var(--border-color-hover);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-card);
+        }
+
+        .asset-icon {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto var(--space-sm);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .asset-icon svg {
+            width: 28px;
+            height: 28px;
+            stroke-width: 1.5;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .asset-card h3 {
+            font-size: var(--font-size-base);
+            margin-bottom: var(--space-xs);
+        }
+
+        .asset-card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            line-height: 1.6;
+        }
+
+        /* ============================================
+           TEAM SECTION
+           ============================================ */
+        .team-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: var(--space-lg);
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .team-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: var(--space-lg) var(--space-md);
+            text-align: center;
+            transition: all var(--transition-base);
+        }
+
+        .team-card:hover {
+            border-color: var(--border-color-hover);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-card);
+        }
+
+        .team-photo {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            object-fit: cover;
+            margin: 0 auto var(--space-sm);
+            border: 3px solid var(--border-color);
+            transition: border-color var(--transition-base);
+        }
+
+        .team-card:hover .team-photo {
+            border-color: var(--color-primary);
+        }
+
+        .team-card h3 {
+            font-size: var(--font-size-base);
+            margin-bottom: 4px;
+        }
+
+        .team-title {
+            color: var(--color-primary);
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: var(--space-xs);
+        }
+
+        .team-desc {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            line-height: 1.6;
+        }
+
+        /* ============================================
+           FOOTER
+           ============================================ */
+        .footer {
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            padding: var(--space-xl) 0 var(--space-lg);
+        }
+
+        .footer-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-lg);
+        }
+
+        .footer-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .footer-brand img {
+            height: 32px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .footer-brand span {
+            font-weight: var(--font-weight-semibold);
+            font-size: var(--font-size-lg);
+        }
+
+        .footer-links {
+            display: flex;
+            gap: var(--space-md);
+            list-style: none;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a,
+        .footer-links button {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-family: var(--font-family);
+        }
+
+        .footer-links a:hover,
+        .footer-links button:hover {
+            color: var(--color-primary);
+        }
+
+        .footer-disclosure {
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(239, 68, 68, 0.15);
+            background: rgba(239, 68, 68, 0.04);
+            margin-bottom: var(--space-md);
+        }
+
+        .footer-disclosure p {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .footer-powered-by {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding-top: var(--space-md);
+            margin-top: var(--space-md);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer-powered-by span {
+            font-size: var(--font-size-sm);
+            color: var(--text-muted);
+            letter-spacing: 0.02em;
+        }
+
+        .footer-powered-by img {
+            height: 34px;
+            width: auto;
+            filter: invert(1) brightness(0.72);
+            opacity: 0.75;
+            transition: opacity 0.3s ease;
+        }
+
+        .footer-powered-by img:hover {
+            opacity: 1;
+        }
+
+        /* ============================================
+           ANIMATIONS
+           ============================================ */
+        .reveal {
+            opacity: 0;
+            transform: translateY(32px);
+            transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+                        transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .reveal.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .reveal-delay-1 { transition-delay: 0.1s; }
+        .reveal-delay-2 { transition-delay: 0.2s; }
+        .reveal-delay-3 { transition-delay: 0.3s; }
+        .reveal-delay-4 { transition-delay: 0.4s; }
+        .reveal-delay-5 { transition-delay: 0.5s; }
+
+        /* ============================================
+           RESPONSIVE
+           ============================================ */
+        @media (max-width: 768px) {
+            :root {
+                --font-size-5xl: 2.25rem;
+                --font-size-4xl: 2rem;
+                --font-size-3xl: 1.5rem;
+            }
+
+            .nav-toggle {
+                display: flex;
+            }
+
+            .nav-links {
+                position: fixed;
+                top: 0;
+                right: -100%;
+                width: 280px;
+                height: 100vh;
+                background: var(--bg-secondary);
+                flex-direction: column;
+                align-items: flex-start;
+                padding: calc(var(--nav-height) + var(--space-md)) var(--space-md) var(--space-md);
+                gap: var(--space-xs);
+                border-left: 1px solid var(--border-color);
+                transition: right var(--transition-base);
+                box-shadow: -8px 0 32px rgba(0,0,0,0.3);
+            }
+
+            .nav-links.open {
+                right: 0;
+            }
+
+            .nav-links a {
+                width: 100%;
+                padding: 12px 16px;
+                border-radius: var(--radius-sm);
+            }
+
+            .nav-links a:hover {
+                background: var(--color-primary-glow);
+            }
+
+            .nav-links a::after {
+                display: none;
+            }
+
+            .nav-register {
+                width: 100%;
+                text-align: center;
+                margin-top: var(--space-xs);
+            }
+
+            .hero {
+                min-height: auto;
+                padding-top: calc(var(--nav-height) + var(--space-2xl));
+                padding-bottom: var(--space-2xl);
+            }
+
+            .steps-grid {
+                grid-template-columns: 1fr;
+                max-width: 400px;
+                margin: 0 auto;
+            }
+
+            .assets-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .team-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: var(--space-md);
+            }
+
+            .section {
+                padding-top: var(--space-2xl);
+                padding-bottom: var(--space-2xl);
+            }
+
+            .footer-top {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .footer-links {
+                flex-direction: column;
+                gap: var(--space-xs);
+            }
+        }
+
+        @media (max-width: 480px) {
+            .assets-grid {
+                grid-template-columns: 1fr;
+                max-width: 320px;
+                margin: 0 auto;
+            }
+
+            .team-grid {
+                grid-template-columns: 1fr;
+                max-width: 280px;
+                margin: 0 auto;
+            }
+
+            .footer-powered-by {
+                flex-direction: column;
+                gap: 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ============================================
+         NAVIGATION
+         ============================================ -->
+    <header>
+        <nav class="nav" id="navbar">
+            <div class="container nav-inner">
+                <a href="index.html" class="nav-brand">
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+
+                <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+
+                <ul class="nav-links" id="navLinks">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Investment Portfolio</a></li>
+                    <li><a href="contact.html">Contact Us</a></li>
+                    <li id="navAuthItem"><a href="auth.html" class="nav-register" id="navAuthLink">Sign In / Register</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+
+        <!-- ============================================
+             HERO SECTION
+             ============================================ -->
+        <section class="hero" id="hero">
+            <div class="hero-bg"></div>
+            <div class="hero-grid"></div>
+            <div class="container hero-content" style="max-width:900px;">
+                <span class="section-label reveal">About Tesla InvestCore</span>
+                <h1 class="reveal reveal-delay-1" style="font-size: var(--font-size-4xl); margin-bottom: var(--space-sm);">
+                    AI-Powered Investing for <span class="highlight">Everyone</span>
+                </h1>
+                <p class="hero-sub reveal reveal-delay-2">
+                    Tesla InvestCore is an AI-driven investment platform that trades across five asset classes — Cryptocurrency, Forex, Stocks, Commodities, and Real Estate — so you don't have to.
+                </p>
+            </div>
+        </section>
+
+        <!-- ============================================
+             OUR MISSION
+             ============================================ -->
+        <section class="section" id="mission">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="section-label">Our Mission</span>
+                    <h2>Democratizing Professional Investing</h2>
+                </div>
+                <p class="mission-text reveal reveal-delay-1">
+                    We believe every investor — regardless of experience or portfolio size — deserves access to the same sophisticated, algorithmic trading strategies once reserved for institutional players. Tesla InvestCore's proprietary AI engine analyzes markets around the clock, executing precision trades across Crypto, Forex, Stocks, Commodities, and Real Estate. Our profit-share model ensures we only earn when you do — there are zero upfront fees. Simply deposit, let the AI work, and share in the profits.
+                </p>
+            </div>
+        </section>
+
+        <!-- ============================================
+             HOW IT WORKS
+             ============================================ -->
+        <section class="section section-alt" id="how-it-works">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="section-label">How It Works</span>
+                    <h2>Three Simple Steps</h2>
+                    <p>Professional-grade returns without managing trades yourself.</p>
+                </div>
+
+                <div class="steps-grid">
+                    <!-- Step 1 -->
+                    <div class="step-card reveal reveal-delay-1">
+                        <div class="step-icon" style="background:rgba(34,197,94,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#22c55e;"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                        </div>
+                        <div class="step-number">1</div>
+                        <h3>Deposit Funds</h3>
+                        <p>Choose your investment amount and fund your Tesla InvestCore account securely. No minimums, no hidden fees, no lock-in periods.</p>
+                    </div>
+
+                    <!-- Connector -->
+                    <span class="step-connector step-connector-1">→</span>
+
+                    <!-- Step 2 -->
+                    <div class="step-card reveal reveal-delay-2">
+                        <div class="step-icon" style="background:rgba(59,130,246,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#3b82f6;"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 8v4l3 3"/><path d="M16 2h6v6"/><path d="M22 2 16.5 7.5"/></svg>
+                        </div>
+                        <div class="step-number">2</div>
+                        <h3>AI Trades For You</h3>
+                        <p>Our proprietary AI engine monitors and trades across five asset classes 24/7 — analyzing signals, maximizing returns, and optimizing performance automatically.</p>
+                    </div>
+
+                    <!-- Connector -->
+                    <span class="step-connector step-connector-2">→</span>
+
+                    <!-- Step 3 -->
+                    <div class="step-card reveal reveal-delay-3">
+                        <div class="step-icon" style="background:rgba(239,68,68,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#ef4444;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        </div>
+                        <div class="step-number">3</div>
+                        <h3>Earn Profits</h3>
+                        <p>Profits are shared transparently — Tesla InvestCore only earns when you earn. Withdraw your earnings anytime with no penalties.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             ASSET CLASSES
+             ============================================ -->
+        <section class="section" id="assets">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="section-label">Asset Classes</span>
+                    <h2>Trade Across Five Markets</h2>
+                    <p>Diversify your portfolio with AI-powered trading across multiple asset classes.</p>
+                </div>
+
+                <div class="assets-grid">
+                    <!-- Crypto -->
+                    <div class="asset-card reveal reveal-delay-1">
+                        <div class="asset-icon" style="background:rgba(247,147,26,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#f7931a;"><path d="M11.767 19.089c4.924.868 6.14-6.025 1.216-6.894m-1.216 6.894L5.86 18.047m5.908 1.042-.347 1.97m1.563-8.864c4.924.869 6.14-6.025 1.215-6.893m-1.215 6.893-3.94-.694m5.155-6.2L8.29 4.26m5.908 1.042.348-1.97M7.48 20.364l3.126-17.727"/></svg>
+                        </div>
+                        <h3>Cryptocurrency</h3>
+                        <p>BTC, ETH, and 50+ altcoins traded 24/7 with AI-optimized entry and exit points.</p>
+                    </div>
+
+                    <!-- Forex -->
+                    <div class="asset-card reveal reveal-delay-2">
+                        <div class="asset-icon" style="background:rgba(59,130,246,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#3b82f6;"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                        </div>
+                        <h3>Forex</h3>
+                        <p>Major, minor, and exotic currency pairs with AI-driven technical and fundamental analysis.</p>
+                    </div>
+
+                    <!-- Stocks -->
+                    <div class="asset-card reveal reveal-delay-3">
+                        <div class="asset-icon" style="background:rgba(34,197,94,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#22c55e;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        </div>
+                        <h3>Stocks</h3>
+                        <p>S&amp;P 500 constituents and global equities, traded using quantitative momentum strategies.</p>
+                    </div>
+
+                    <!-- Commodities -->
+                    <div class="asset-card reveal reveal-delay-4">
+                        <div class="asset-icon" style="background:rgba(234,179,8,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#eab308;"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                        </div>
+                        <h3>Commodities</h3>
+                        <p>Gold, silver, oil, and agricultural futures — hedging and directional trades via AI signals.</p>
+                    </div>
+
+                    <!-- Real Estate -->
+                    <div class="asset-card reveal reveal-delay-5">
+                        <div class="asset-icon" style="background:rgba(168,85,247,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#a855f7;"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                        </div>
+                        <h3>Real Estate</h3>
+                        <p>Tokenized real-estate exposure and REITs, algorithmically selected for yield and appreciation.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             OUR TEAM
+             ============================================ -->
+        <section class="section section-alt" id="team">
+            <div class="container">
+                <div class="section-header reveal">
+                    <span class="section-label">Leadership</span>
+                    <h2>Our Team</h2>
+                    <p>Meet the experienced professionals steering Tesla InvestCore's vision and technology.</p>
+                </div>
+
+                <div class="team-grid">
+                    <!-- Ronald A. Peters -->
+                    <div class="team-card reveal reveal-delay-1">
+                        <img src="images/team/ronald-peters.jpg" alt="Ronald A. Peters" class="team-photo" loading="lazy">
+                        <h3>Ronald A. Peters</h3>
+                        <div class="team-title">CEO</div>
+                        <p class="team-desc">Oversees all company operations and strategy, with over two decades of experience in quantitative finance and technology leadership.</p>
+                    </div>
+
+                    <!-- Elena Rodriguez -->
+                    <div class="team-card reveal reveal-delay-2">
+                        <img src="images/team/elena-rodriguez.jpg" alt="Elena Rodriguez" class="team-photo" loading="lazy">
+                        <h3>Elena Rodriguez</h3>
+                        <div class="team-title">COO</div>
+                        <p class="team-desc">Directs daily operations and ensures the seamless integration of multi-asset trading protocols.</p>
+                    </div>
+
+                    <!-- David L. Chen -->
+                    <div class="team-card reveal reveal-delay-3">
+                        <img src="images/team/david-chen.jpg" alt="David L. Chen" class="team-photo" loading="lazy">
+                        <h3>David L. Chen</h3>
+                        <div class="team-title">CFO</div>
+                        <p class="team-desc">Manages the company's financial planning, performance optimization, and regulatory compliance across global markets.</p>
+                    </div>
+
+                    <!-- Sarah J. Miller -->
+                    <div class="team-card reveal reveal-delay-4">
+                        <img src="images/team/sarah-miller.jpg" alt="Sarah J. Miller" class="team-photo" loading="lazy">
+                        <h3>Sarah J. Miller</h3>
+                        <div class="team-title">CTO</div>
+                        <p class="team-desc">Leads the development of Tesla InvestCore's proprietary AI engine and secure trading infrastructure.</p>
+                    </div>
+
+                    <!-- Michael B. Thompson -->
+                    <div class="team-card reveal reveal-delay-5">
+                        <img src="images/team/michael-thompson.jpg" alt="Michael B. Thompson" class="team-photo" loading="lazy">
+                        <h3>Michael B. Thompson</h3>
+                        <div class="team-title">Head of AI Research</div>
+                        <p class="team-desc">Pioneers the machine-learning models and algorithmic strategies that power Tesla InvestCore's trading engine.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ============================================
+         FOOTER
+         ============================================ -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-top">
+                <a href="index.html" class="footer-brand">
+                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+                <ul class="footer-links">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Portfolio</a></li>
+                    <li><a href="contact.html">Contact</a></li>
+                    <li><a href="auth.html" id="footerAuthLink">Login / Register</a></li>
+                </ul>
+            </div>
+
+            <div class="footer-disclosure">
+                <p>
+                    <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
+                    Tesla InvestCore is committed to delivering consistent, optimized returns through AI-powered precision trading across all major asset classes. Our intelligent systems work 24/7 to grow your portfolio.
+                </p>
+            </div>
+
+            <div style="display:flex; gap: var(--space-md); margin-bottom: var(--space-md); flex-wrap: wrap;">
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Privacy Policy</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Terms of Service</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Risk Disclosure</a>
+            </div>
+
+            <div class="footer-bottom">
+                &copy; 2026 Tesla InvestCore. All rights reserved.
+            </div>
+
+            <div class="footer-powered-by">
+                <span>Powered by</span>
+                <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
+            </div>
+        </div>
+    </footer>
+
+    <!-- ============================================
+         JAVASCRIPT
+         ============================================ -->
+    <script>
+        (function() {
+            'use strict';
+
+            /* ==========================================
+               MOBILE NAVIGATION TOGGLE
+               ========================================== */
+            const navToggle = document.getElementById('navToggle');
+            const navLinks = document.getElementById('navLinks');
+
+            navToggle.addEventListener('click', function() {
+                navToggle.classList.toggle('active');
+                navLinks.classList.toggle('open');
+            });
+
+            // Close nav when clicking a link on mobile
+            navLinks.querySelectorAll('a').forEach(function(link) {
+                link.addEventListener('click', function() {
+                    navToggle.classList.remove('active');
+                    navLinks.classList.remove('open');
+                });
+            });
+
+            // Close nav when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!navToggle.contains(e.target) && !navLinks.contains(e.target)) {
+                    navToggle.classList.remove('active');
+                    navLinks.classList.remove('open');
+                }
+            });
+
+            /* ==========================================
+               SMOOTH SCROLL FOR ANCHOR LINKS
+               ========================================== */
+            document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
+                anchor.addEventListener('click', function(e) {
+                    var targetId = this.getAttribute('href');
+                    if (targetId === '#') return;
+                    var target = document.querySelector(targetId);
+                    if (target) {
+                        e.preventDefault();
+                        var navHeight = document.querySelector('.nav').offsetHeight;
+                        var targetPosition = target.getBoundingClientRect().top + window.pageYOffset - navHeight;
+                        window.scrollTo({
+                            top: targetPosition,
+                            behavior: 'smooth'
+                        });
+                    }
+                });
+            });
+
+            /* ==========================================
+               SCROLL REVEAL ANIMATION
+               ========================================== */
+            var revealElements = document.querySelectorAll('.reveal');
+
+            function revealOnScroll() {
+                var windowHeight = window.innerHeight;
+                revealElements.forEach(function(el) {
+                    var elementTop = el.getBoundingClientRect().top;
+                    var revealPoint = windowHeight - 80;
+                    if (elementTop < revealPoint) {
+                        el.classList.add('visible');
+                    }
+                });
+            }
+
+            // Initial check
+            revealOnScroll();
+
+            // Throttled scroll listener
+            var scrollTimer = null;
+            window.addEventListener('scroll', function() {
+                if (scrollTimer !== null) return;
+                scrollTimer = setTimeout(function() {
+                    revealOnScroll();
+                    scrollTimer = null;
+                }, 50);
+            }, { passive: true });
+
+            /* ==========================================
+               NAVBAR BACKGROUND ON SCROLL
+               ========================================== */
+            var navbar = document.getElementById('navbar');
+
+            function updateNav() {
+                if (window.scrollY > 20) {
+                    navbar.style.borderBottomColor = 'var(--border-color-hover)';
+                } else {
+                    navbar.style.borderBottomColor = 'var(--border-color)';
+                }
+            }
+
+            window.addEventListener('scroll', updateNav, { passive: true });
+            updateNav();
+
+        })();
+    </script>
+
+    <!-- Auth state: swap Sign In to Logout if user is logged in -->
+    <script>
+    (async function() {
+        try {
+            if (!window.InvestCoreSupabase) return;
+            var auth = await window.InvestCoreSupabase.getCurrentUserAcrossHives();
+            if (auth && auth.user) {
+                // Swap nav button to Logout
+                var authItem = document.getElementById('navAuthItem');
+                if (authItem) {
+                    authItem.innerHTML = '<button class="nav-register" id="navLogoutBtn" style="cursor:pointer;border:none;font-family:inherit;font-size:var(--font-size-sm);">Logout</button>';
+                    document.getElementById('navLogoutBtn').addEventListener('click', async function() {
+                        await window.InvestCoreSupabase.logoutAll();
+                        window.location.href = 'auth.html';
+                    });
+                }
+                // Swap footer link too
+                var footerAuth = document.getElementById('footerAuthLink');
+                if (footerAuth) {
+                    footerAuth.textContent = 'Logout';
+                    footerAuth.removeAttribute('href');
+                    footerAuth.style.cursor = 'pointer';
+                    footerAuth.addEventListener('click', async function() {
+                        await window.InvestCoreSupabase.logoutAll();
+                        window.location.href = 'auth.html';
+                    });
+                }
+            }
+        } catch(e) {}
+    })();
+    </script>
+
+</body>
+</html>

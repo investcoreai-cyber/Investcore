@@ -1,0 +1,3051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Tesla InvestCore — AI-Driven Multi-Asset Investment Platform. Algorithmic trading across Crypto, Forex, Stocks, Commodities & Real Estate with structured risk management.">
+    <meta name="theme-color" content="#0f172a">
+    <title>Tesla InvestCore — AI-Driven Crypto, Forex, Stocks, Commodities & Real Estate Investment</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+// ─── Tesla InvestCore: load hives from config.txt, no config.js needed ───────────
+(function () {
+    var _hives = [], _clients = {};
+
+    // Load config.txt synchronously so hive data is ready before any script runs
+    try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'config.txt', false);
+        xhr.send();
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            if (data && Array.isArray(data.hives)) _hives = data.hives;
+        }
+    } catch (e) { console.error('[IC] config.txt load failed:', e); }
+
+    function _client(index) {
+        if (_clients[index]) return _clients[index];
+        var h = _hives[index];
+        if (!h) throw new Error('No hive config for index ' + index);
+        _clients[index] = window.supabase.createClient(h.url, h.anonKey, {
+            auth: { persistSession: true, autoRefreshToken: true,
+                    detectSessionInUrl: true, storageKey: 'investcore-sb-auth-' + index }
+        });
+        return _clients[index];
+    }
+
+    function getStoredHiveId() {
+        var v = Number(localStorage.getItem('investcore_hiveId'));
+        return Number.isFinite(v) && v >= 0 ? v : null;
+    }
+
+    function storeAuthContext(p) {
+        if (p.hiveId !== undefined) localStorage.setItem('investcore_hiveId', String(p.hiveId));
+        if (p.userId)   localStorage.setItem('investcore_userId',    p.userId);
+        if (p.email)    localStorage.setItem('investcore_userEmail', p.email);
+        if (p.fullName) localStorage.setItem('investcore_fullName',  p.fullName);
+    }
+
+    function clearAuthContext() {
+        ['investcore_hiveId','investcore_userId','investcore_userEmail','investcore_fullName']
+            .forEach(function(k) { localStorage.removeItem(k); });
+    }
+
+    function getUserHives() { return _hives.filter(function(h) { return h.role === 'user'; }); }
+
+    function getAllHiveClients() {
+        return _hives.map(function(h) {
+            try { return _client(h.index); } catch(e) { return null; }
+        }).filter(Boolean);
+    }
+
+    function getClient(opts) {
+        var o = opts || {};
+        if (o.admin) return _client(0);
+        if (typeof o.hiveId === 'number') return _client(o.hiveId);
+        var s = getStoredHiveId();
+        return s !== null ? _client(s) : _client(_hives.length > 1 ? 1 : 0);
+    }
+
+    async function safeGetCurrentUser(client) {
+        try {
+            var r = await client.auth.getUser();
+            return r && r.data ? r.data.user || null : null;
+        } catch(e) { return null; }
+    }
+
+    async function getCurrentUserAcrossHives() {
+        var storedHiveId = getStoredHiveId();
+
+        // 1. Priority Check: Verify the hive the user was ALREADY using (from localStorage)
+        if (storedHiveId !== null) {
+            var currentClient = _client(storedHiveId);
+            var user = await safeGetCurrentUser(currentClient);
+            if (user) {
+                storeAuthContext({ hiveId: storedHiveId, userId: user.id,
+                    email: user.email || '',
+                    fullName: user.user_metadata ? user.user_metadata.full_name || '' : '' });
+                return { hiveId: storedHiveId, client: currentClient, user: user };
+            }
+        }
+
+        // 2. Fallback: Query global_directory on Hive 0 to find the user's hive.
+        //    We need the user's email from localStorage to look them up.
+        var storedEmail = localStorage.getItem('investcore_userEmail');
+        if (storedEmail) {
+            try {
+                var hive0 = _client(0);
+                var dirResult = await hive0.from('global_directory')
+                    .select('hive_id')
+                    .eq('email', storedEmail.toLowerCase().trim())
+                    .maybeSingle();
+                if (!dirResult.error && dirResult.data) {
+                    var targetHiveId = dirResult.data.hive_id;
+                    var targetClient = _client(targetHiveId);
+                    var targetUser = await safeGetCurrentUser(targetClient);
+                    if (targetUser) {
+                        storeAuthContext({ hiveId: targetHiveId, userId: targetUser.id,
+                            email: targetUser.email || '',
+                            fullName: targetUser.user_metadata ? targetUser.user_metadata.full_name || '' : '' });
+                        return { hiveId: targetHiveId, client: targetClient, user: targetUser };
+                    }
+                }
+            } catch(e) {
+                console.warn('[IC] global_directory fallback failed:', e);
+            }
+        }
+
+        return null;
+    }
+
+    async function logoutAll() {
+        var jobs = _hives.map(function(h) {
+            try { return _client(h.index).auth.signOut(); } catch(e) { return Promise.resolve(); }
+        });
+        await Promise.allSettled(jobs);
+        clearAuthContext();
+    }
+
+    async function fetchApprovedReviewsAcrossHives() {
+        var results = [];
+        var userHives = getUserHives();
+        for (var i = 0; i < userHives.length; i++) {
+            var idx = userHives[i].index;
+            try {
+                var r = await _client(idx).from('reviews').select('*').eq('approved', true)
+                    .order('created_at', { ascending: false });
+                if (!r.error && Array.isArray(r.data))
+                    r.data.forEach(function(item) { results.push(Object.assign({}, item, { hiveId: idx })); });
+            } catch(e) {}
+        }
+        return results;
+    }
+
+    async function fetchPendingReviewsAcrossHives() {
+        var results = [];
+        var userHives = getUserHives();
+        for (var i = 0; i < userHives.length; i++) {
+            var idx = userHives[i].index;
+            try {
+                var r = await _client(idx).from('reviews').select('*').eq('approved', false)
+                    .order('created_at', { ascending: false });
+                if (!r.error && Array.isArray(r.data))
+                    r.data.forEach(function(item) { results.push(Object.assign({}, item, { hiveId: idx })); });
+            } catch(e) {}
+        }
+        return results;
+    }
+
+    window.InvestCoreSupabase = {
+        hiveConfigs: _hives,
+        getHiveConfig: function(i) { return _hives[i] || null; },
+        getUserHives: getUserHives,
+        getAllHiveClients: getAllHiveClients,
+        getClient: getClient,
+        getStoredHiveId: getStoredHiveId,
+        storeAuthContext: storeAuthContext,
+        clearAuthContext: clearAuthContext,
+        safeGetCurrentUser: safeGetCurrentUser,
+        getCurrentUserAcrossHives: getCurrentUserAcrossHives,
+        logoutAll: logoutAll,
+        fetchApprovedReviewsAcrossHives: fetchApprovedReviewsAcrossHives,
+        fetchPendingReviewsAcrossHives: fetchPendingReviewsAcrossHives
+    };
+})();
+</script>
+    <script src="reviews-data.js"></script>
+    <style>
+        /* ============================================
+           DESIGN SYSTEM — CSS VARIABLES
+           ============================================ */
+        :root {
+            /* Colors — Dark Mode (Default) */
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #0b1120;
+            --bg-card: #162032;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --color-primary: #ef4444;
+            --color-primary-hover: #dc2626;
+            --color-primary-glow: rgba(239, 68, 68, 0.15);
+            --color-accent: #f87171;
+            --color-accent-hover: #ef4444;
+            --color-accent-glow: rgba(248, 113, 113, 0.12);
+            --color-error: #7f1d1d;
+            --color-warning: #f59e0b;
+            --border-color: rgba(239, 68, 68, 0.12);
+            --border-color-hover: rgba(239, 68, 68, 0.3);
+
+            /* Spacing */
+            --space-xs: 8px;
+            --space-sm: 16px;
+            --space-md: 24px;
+            --space-lg: 32px;
+            --space-xl: 48px;
+            --space-2xl: 64px;
+            --space-3xl: 96px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+            --font-size-xs: 0.75rem;
+            --font-size-sm: 0.875rem;
+            --font-size-base: 1rem;
+            --font-size-lg: 1.125rem;
+            --font-size-xl: 1.25rem;
+            --font-size-2xl: 1.5rem;
+            --font-size-3xl: 2rem;
+            --font-size-4xl: 2.75rem;
+            --font-size-5xl: 3.5rem;
+            --font-weight-normal: 400;
+            --font-weight-medium: 500;
+            --font-weight-semibold: 600;
+            --font-weight-bold: 700;
+
+            /* Borders & Shadows */
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --radius-xl: 24px;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.35);
+            --shadow-lg: 0 8px 32px rgba(0,0,0,0.4);
+            --shadow-card: 0 4px 24px rgba(0,0,0,0.3), 0 1px 4px rgba(239,68,68,0.06);
+
+            /* Transitions */
+            --transition-fast: 150ms ease;
+            --transition-base: 250ms ease;
+            --transition-slow: 400ms ease;
+
+            /* Layout */
+            --container-max: 1200px;
+            --nav-height: 72px;
+        }
+
+        /* Light mode override */
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg-primary: #ffffff;
+                --bg-secondary: #f8fafc;
+                --bg-tertiary: #f1f5f9;
+                --bg-card: #ffffff;
+                --text-primary: #1e293b;
+                --text-secondary: #475569;
+                --text-muted: #94a3b8;
+                --color-primary: #dc2626;
+                --color-primary-hover: #b91c1c;
+                --color-primary-glow: rgba(220, 38, 38, 0.1);
+                --color-accent: #e11d48;
+                --color-accent-hover: #be123c;
+                --color-accent-glow: rgba(225, 29, 72, 0.1);
+                --border-color: rgba(220, 38, 38, 0.1);
+                --border-color-hover: rgba(220, 38, 38, 0.25);
+                --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+                --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+                --shadow-lg: 0 8px 32px rgba(0,0,0,0.1);
+                --shadow-card: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(220,38,38,0.04);
+            }
+        }
+
+        /* ============================================
+           RESET & BASE
+           ============================================ */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-weight: var(--font-weight-normal);
+            font-size: var(--font-size-base);
+            line-height: 1.65;
+            color: var(--text-primary);
+            background-color: var(--bg-primary);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        a {
+            color: var(--color-primary);
+            text-decoration: none;
+            transition: color var(--transition-fast);
+        }
+
+        a:hover {
+            color: var(--color-primary-hover);
+        }
+
+        h1, h2, h3, h4, h5, h6 {
+            font-weight: var(--font-weight-semibold);
+            line-height: 1.25;
+            color: var(--text-primary);
+        }
+
+        /* ============================================
+           LAYOUT UTILITIES
+           ============================================ */
+        .container {
+            width: 100%;
+            max-width: var(--container-max);
+            margin-left: auto;
+            margin-right: auto;
+            padding-left: var(--space-md);
+            padding-right: var(--space-md);
+        }
+
+        .section {
+            padding-top: var(--space-3xl);
+            padding-bottom: var(--space-3xl);
+        }
+
+        .section-alt {
+            background-color: var(--bg-secondary);
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: var(--space-2xl);
+        }
+
+        .section-header h2 {
+            font-size: var(--font-size-3xl);
+            margin-bottom: var(--space-sm);
+        }
+
+        .section-header p {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            max-width: 640px;
+            margin: 0 auto;
+        }
+
+        .section-label {
+            display: inline-block;
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--color-primary);
+            margin-bottom: var(--space-xs);
+        }
+
+        /* ============================================
+           BUTTONS
+           ============================================ */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 28px;
+            font-family: var(--font-family);
+            font-size: var(--font-size-base);
+            font-weight: var(--font-weight-medium);
+            line-height: 1.4;
+            border: 2px solid transparent;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all var(--transition-base);
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: var(--color-primary);
+            color: #ffffff;
+            border-color: var(--color-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--color-primary-hover);
+            border-color: var(--color-primary-hover);
+            color: #ffffff;
+            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.35);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-primary);
+            border-color: var(--border-color-hover);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--color-primary);
+            color: var(--color-primary);
+            background: var(--color-primary-glow);
+            transform: translateY(-1px);
+        }
+
+        .btn-sm {
+            padding: 8px 20px;
+            font-size: var(--font-size-sm);
+        }
+
+        /* ============================================
+           CARDS
+           ============================================ */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: var(--space-lg);
+            box-shadow: var(--shadow-card);
+            transition: all var(--transition-base);
+        }
+
+        .card:hover {
+            border-color: var(--border-color-hover);
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-4px);
+        }
+
+        .card-icon {
+            width: 56px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-md);
+            background: var(--color-primary-glow);
+            margin-bottom: var(--space-sm);
+        }
+
+        .card-icon svg {
+            width: 28px;
+            height: 28px;
+            stroke: var(--color-primary);
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .card-icon-accent {
+            background: var(--color-accent-glow);
+        }
+
+        .card-icon-accent svg {
+            stroke: var(--color-accent);
+        }
+
+        .card h3 {
+            font-size: var(--font-size-xl);
+            margin-bottom: var(--space-xs);
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            line-height: 1.7;
+        }
+
+        /* ============================================
+           NAVIGATION
+           ============================================ */
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: var(--nav-height);
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border-color);
+            z-index: 1000;
+            transition: background var(--transition-base);
+        }
+
+        @media (prefers-color-scheme: light) {
+            .nav {
+                background: rgba(255, 255, 255, 0.88);
+            }
+        }
+
+        .nav-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 100%;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
+            flex-shrink: 0;
+        }
+
+        .nav-brand:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-brand img {
+            height: 42px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .nav-brand span {
+            font-size: var(--font-size-xl);
+            font-weight: var(--font-weight-bold);
+            letter-spacing: -0.5px;
+        }
+
+        .brand-gradient {
+            background: linear-gradient(135deg, var(--color-primary), #e11d48, #be123c);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: var(--font-weight-bold);
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            padding: 6px 4px;
+            transition: color var(--transition-fast);
+            position: relative;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--color-primary);
+            border-radius: 1px;
+            transition: width var(--transition-base);
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        .nav-register {
+            padding: 8px 20px !important;
+            background: var(--color-primary) !important;
+            color: #ffffff !important;
+            border-radius: var(--radius-md) !important;
+            font-weight: var(--font-weight-medium) !important;
+        }
+
+        .nav-register::after {
+            display: none !important;
+        }
+
+        .nav-register:hover {
+            background: var(--color-primary-hover) !important;
+            box-shadow: 0 4px 16px rgba(239,68,68,0.3);
+        }
+
+        /* Mobile toggle */
+        .nav-toggle {
+            display: none;
+            flex-direction: column;
+            gap: 5px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 8px;
+            z-index: 1001;
+        }
+
+        .nav-toggle span {
+            display: block;
+            width: 24px;
+            height: 2px;
+            background: var(--text-primary);
+            border-radius: 2px;
+            transition: all var(--transition-base);
+        }
+
+        .nav-toggle.active span:nth-child(1) {
+            transform: rotate(45deg) translate(5px, 5px);
+        }
+
+        .nav-toggle.active span:nth-child(2) {
+            opacity: 0;
+        }
+
+        .nav-toggle.active span:nth-child(3) {
+            transform: rotate(-45deg) translate(5px, -5px);
+        }
+
+        /* ============================================
+           HERO SECTION
+           ============================================ */
+        .hero {
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            padding-top: var(--nav-height);
+            overflow: hidden;
+        }
+
+        .hero-bg {
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse 80% 60% at 50% 0%, rgba(239,68,68,0.10) 0%, transparent 60%),
+                radial-gradient(ellipse 50% 50% at 80% 50%, rgba(239,68,68,0.04) 0%, transparent 60%),
+                var(--bg-primary);
+            z-index: 0;
+        }
+
+        .hero-grid {
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(239,68,68,0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(239,68,68,0.04) 1px, transparent 1px);
+            background-size: 60px 60px;
+            z-index: 0;
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .hero h1 {
+            font-size: var(--font-size-5xl);
+            font-weight: var(--font-weight-bold);
+            letter-spacing: -1.5px;
+            margin-bottom: var(--space-md);
+            line-height: 1.1;
+        }
+
+        .hero h1 .highlight {
+            background: linear-gradient(135deg, #ef4444, #fb7185);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-sub {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto var(--space-xl);
+            line-height: 1.7;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: var(--space-sm);
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .hero-stats {
+            display: flex;
+            justify-content: center;
+            gap: var(--space-xl);
+            margin-top: var(--space-2xl);
+            flex-wrap: wrap;
+        }
+
+        .hero-stat {
+            text-align: center;
+        }
+
+        .hero-stat-value {
+            font-size: var(--font-size-3xl);
+            font-weight: var(--font-weight-bold);
+            color: var(--color-primary);
+        }
+
+        .hero-stat-label {
+            font-size: var(--font-size-sm);
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* ============================================
+           HOW IT WORKS
+           ============================================ */
+        .steps-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: var(--space-md);
+        }
+
+        .step-card {
+            text-align: center;
+            position: relative;
+        }
+
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--color-primary);
+            color: #ffffff;
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-semibold);
+            margin-bottom: var(--space-sm);
+        }
+
+        .step-card .card-icon {
+            margin: 0 auto var(--space-sm);
+        }
+
+        /* ============================================
+           TECHNOLOGY SECTION
+           ============================================ */
+        .tech-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: var(--space-xl);
+            align-items: center;
+        }
+
+        .tech-image-wrap {
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .tech-image-wrap img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .tech-list {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .tech-item {
+            display: flex;
+            gap: var(--space-sm);
+            align-items: flex-start;
+        }
+
+        .tech-item-icon {
+            flex-shrink: 0;
+            width: 44px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-md);
+            background: var(--color-primary-glow);
+        }
+
+        .tech-item-icon svg {
+            width: 22px;
+            height: 22px;
+            stroke: var(--color-primary);
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .tech-item-text h4 {
+            font-size: var(--font-size-base);
+            margin-bottom: 4px;
+        }
+
+        .tech-item-text p {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+        }
+
+        /* ============================================
+           PERFORMANCE MODEL
+           ============================================ */
+        .perf-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: var(--space-md);
+        }
+
+        .perf-card .card-icon svg {
+            stroke-width: 1.6;
+        }
+
+        .perf-card .perf-value {
+            font-size: var(--font-size-2xl);
+            font-weight: var(--font-weight-bold);
+            color: var(--color-primary);
+            margin-bottom: 4px;
+        }
+
+        .perf-card .perf-detail {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        .perf-notice {
+            margin-top: var(--space-lg);
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(var(--color-accent-rgb, 220, 38, 38), 0.25);
+            background: rgba(var(--color-accent-rgb, 220, 38, 38), 0.06);
+            text-align: center;
+        }
+
+        .perf-notice svg {
+            width: 18px;
+            height: 18px;
+            stroke: var(--color-accent);
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            vertical-align: -3px;
+            margin-right: 6px;
+        }
+
+        .perf-notice p {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            display: inline;
+        }
+
+        /* ============================================
+           LEADERSHIP
+           ============================================ */
+        .leader-layout {
+            display: grid;
+            grid-template-columns: 360px 1fr;
+            gap: var(--space-xl);
+            align-items: center;
+        }
+
+        .leader-image-wrap {
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .leader-image-wrap img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .leader-info h3 {
+            font-size: var(--font-size-2xl);
+            margin-bottom: 4px;
+        }
+
+        .leader-info .leader-title {
+            font-size: var(--font-size-base);
+            color: var(--color-primary);
+            font-weight: var(--font-weight-medium);
+            margin-bottom: var(--space-sm);
+        }
+
+        .leader-info p {
+            color: var(--text-secondary);
+            line-height: 1.8;
+            margin-bottom: var(--space-sm);
+        }
+
+        /* ============================================
+           INFRASTRUCTURE
+           ============================================ */
+        .infra-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: var(--space-xl);
+            align-items: center;
+        }
+
+        .infra-image-wrap {
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .infra-image-wrap img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .infra-list {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .infra-item {
+            display: flex;
+            gap: var(--space-sm);
+            align-items: flex-start;
+        }
+
+        .infra-item-icon {
+            flex-shrink: 0;
+            width: 44px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-md);
+            background: var(--color-accent-glow);
+        }
+
+        .infra-item-icon svg {
+            width: 22px;
+            height: 22px;
+            stroke: var(--color-accent);
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .infra-item-text h4 {
+            font-size: var(--font-size-base);
+            margin-bottom: 4px;
+        }
+
+        .infra-item-text p {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+        }
+
+        /* ============================================
+           VIDEO SECTION
+           ============================================ */
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            margin: 0 auto;
+            padding-bottom: 56.25%;
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .video-wrapper iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        /* ============================================
+           CONTACT
+           ============================================ */
+        .contact-card {
+            max-width: 560px;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .contact-card .contact-icon {
+            width: 64px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            background: var(--color-primary-glow);
+            margin: 0 auto var(--space-md);
+        }
+
+        .contact-card .contact-icon svg {
+            width: 30px;
+            height: 30px;
+            stroke: var(--color-primary);
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .contact-address {
+            font-size: var(--font-size-lg);
+            color: var(--text-secondary);
+            line-height: 1.8;
+            font-style: normal;
+        }
+
+        .contact-address strong {
+            color: var(--text-primary);
+            display: block;
+            font-size: var(--font-size-xl);
+            margin-bottom: var(--space-xs);
+        }
+
+        /* ============================================
+           FOOTER
+           ============================================ */
+        .footer {
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            padding: var(--space-xl) 0 var(--space-lg);
+        }
+
+        .footer-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-lg);
+        }
+
+        .footer-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .footer-brand img {
+            height: 32px;
+            width: auto;
+            border-radius: var(--radius-sm);
+        }
+
+        .footer-brand span {
+            font-weight: var(--font-weight-semibold);
+            font-size: var(--font-size-lg);
+        }
+
+        .footer-links {
+            display: flex;
+            gap: var(--space-md);
+            list-style: none;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: var(--text-secondary);
+            font-size: var(--font-size-sm);
+        }
+
+        .footer-links a:hover {
+            color: var(--color-primary);
+        }
+
+        .footer-disclosure {
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-md);
+            border: 1px solid rgba(239, 68, 68, 0.15);
+            background: rgba(239, 68, 68, 0.04);
+            margin-bottom: var(--space-md);
+        }
+
+        .footer-disclosure p {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .footer-powered-by {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding-top: var(--space-md);
+            margin-top: var(--space-md);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer-powered-by span {
+            font-size: var(--font-size-sm);
+            color: var(--text-muted);
+            letter-spacing: 0.02em;
+        }
+
+        .footer-powered-by img {
+            height: 34px;
+            width: auto;
+            filter: invert(1) brightness(0.72);
+            opacity: 0.75;
+            transition: opacity 0.3s ease;
+        }
+
+        .footer-powered-by img:hover {
+            opacity: 1;
+        }
+
+        @media (max-width: 480px) {
+            .footer-powered-by {
+                flex-direction: column;
+                gap: 6px;
+            }
+            .footer-powered-by img {
+                height: 30px;
+            }
+        }
+
+        /* ============================================
+           MARKETS / ASSET CLASSES
+           ============================================ */
+        .markets-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: var(--space-md);
+        }
+
+        .market-card {
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .market-card .card-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto var(--space-sm);
+            border-radius: 50%;
+        }
+
+        .market-card .card-icon svg {
+            width: 30px;
+            height: 30px;
+        }
+
+        .market-card .market-tag {
+            display: inline-block;
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            padding: 4px 12px;
+            border-radius: 100px;
+            background: var(--color-primary-glow);
+            color: var(--color-primary);
+            margin-top: var(--space-xs);
+        }
+
+        .market-card .market-tag-accent {
+            background: var(--color-accent-glow);
+            color: var(--color-accent);
+        }
+
+        @media (max-width: 1200px) {
+            .markets-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+
+        @media (max-width: 900px) {
+            .markets-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .markets-grid {
+                grid-template-columns: 1fr;
+                max-width: 400px;
+                margin: 0 auto;
+            }
+        }
+
+        /* ============================================
+           ANIMATIONS
+           ============================================ */
+        .reveal {
+            opacity: 0;
+            transform: translateY(32px);
+            transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+                        transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .reveal.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .reveal-delay-1 { transition-delay: 0.1s; }
+        .reveal-delay-2 { transition-delay: 0.2s; }
+        .reveal-delay-3 { transition-delay: 0.3s; }
+        .reveal-delay-4 { transition-delay: 0.4s; }
+        .reveal-delay-5 { transition-delay: 0.5s; }
+
+        /* ============================================
+           RESPONSIVE
+           ============================================ */
+        @media (max-width: 1024px) {
+            .steps-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .perf-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .tech-layout,
+            .infra-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .leader-layout {
+                grid-template-columns: 280px 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            :root {
+                --font-size-5xl: 2.25rem;
+                --font-size-4xl: 2rem;
+                --font-size-3xl: 1.5rem;
+            }
+
+            .nav-toggle {
+                display: flex;
+            }
+
+            .nav-links {
+                position: fixed;
+                top: 0;
+                right: -100%;
+                width: 280px;
+                height: 100vh;
+                background: var(--bg-secondary);
+                flex-direction: column;
+                align-items: flex-start;
+                padding: calc(var(--nav-height) + var(--space-md)) var(--space-md) var(--space-md);
+                gap: var(--space-xs);
+                border-left: 1px solid var(--border-color);
+                transition: right var(--transition-base);
+                box-shadow: -8px 0 32px rgba(0,0,0,0.3);
+            }
+
+            .nav-links.open {
+                right: 0;
+            }
+
+            .nav-links a {
+                width: 100%;
+                padding: 12px 16px;
+                border-radius: var(--radius-sm);
+            }
+
+            .nav-links a:hover {
+                background: var(--color-primary-glow);
+            }
+
+            .nav-links a::after {
+                display: none;
+            }
+
+            .nav-register {
+                width: 100%;
+                text-align: center;
+                margin-top: var(--space-xs);
+            }
+
+            .hero {
+                min-height: auto;
+                padding-top: calc(var(--nav-height) + var(--space-2xl));
+                padding-bottom: var(--space-2xl);
+            }
+
+            .hero-stats {
+                gap: var(--space-lg);
+            }
+
+            .steps-grid {
+                grid-template-columns: 1fr;
+                max-width: 400px;
+                margin: 0 auto;
+            }
+
+            .perf-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .leader-layout {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+
+            .leader-image-wrap {
+                max-width: 300px;
+                margin: 0 auto;
+            }
+
+            .section {
+                padding-top: var(--space-2xl);
+                padding-bottom: var(--space-2xl);
+            }
+
+            .footer-top {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .footer-links {
+                flex-direction: column;
+                gap: var(--space-xs);
+            }
+        }
+
+        @media (max-width: 480px) {
+            .hero-actions {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .hero-actions .btn {
+                width: 100%;
+                max-width: 280px;
+            }
+        }
+
+        /* ============================================
+           HERO INSTRUMENT CARDS
+           ============================================ */
+        .hero-instruments {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 14px;
+            margin-top: var(--space-md);
+        }
+
+        .hero-instrument-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 20px 14px 16px;
+            text-align: center;
+            text-decoration: none;
+            color: var(--text-primary);
+            transition: all var(--transition-base);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-instrument-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(239,68,68,0.03), transparent);
+            opacity: 0;
+            transition: opacity var(--transition-base);
+        }
+
+        .hero-instrument-card:hover {
+            border-color: var(--border-color-hover);
+            transform: translateY(-6px);
+            box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+            color: var(--text-primary);
+        }
+
+        .hero-instrument-card:hover::before {
+            opacity: 1;
+        }
+
+        .hero-instr-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .hero-instr-icon svg {
+            width: 26px;
+            height: 26px;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .hero-instr-name {
+            font-size: var(--font-size-base);
+            font-weight: var(--font-weight-semibold);
+        }
+
+        .hero-instr-desc {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        .hero-instr-badge {
+            display: inline-block;
+            font-size: 0.65rem;
+            font-weight: var(--font-weight-semibold);
+            padding: 3px 10px;
+            border-radius: 100px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+        }
+
+        @media (max-width: 1024px) {
+            .hero-instruments {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+
+        @media (max-width: 600px) {
+            .hero-instruments {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .hero-instrument-card:last-child {
+                grid-column: span 2;
+                max-width: 200px;
+                margin: 0 auto;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .hero-instruments {
+                grid-template-columns: 1fr;
+            }
+            .hero-instrument-card:last-child {
+                grid-column: span 1;
+                max-width: none;
+            }
+        }
+
+        /* ============================================
+           REVIEWS / TESTIMONIALS SECTION
+           ============================================ */
+        .reviews-overview {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--space-lg);
+            margin-bottom: var(--space-xl);
+            flex-wrap: wrap;
+        }
+
+        .reviews-score {
+            text-align: center;
+        }
+
+        .reviews-score-number {
+            font-size: var(--font-size-5xl);
+            font-weight: var(--font-weight-bold);
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .reviews-stars-row {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            margin: var(--space-xs) 0;
+            justify-content: center;
+        }
+
+        .reviews-stars-row svg {
+            width: 22px;
+            height: 22px;
+        }
+
+        .reviews-count {
+            font-size: var(--font-size-sm);
+            color: var(--text-muted);
+        }
+
+        .reviews-list {
+            max-width: 760px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .review-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: var(--space-md) var(--space-lg);
+            box-shadow: var(--shadow-card);
+            transition: all var(--transition-base);
+            opacity: 0;
+            transform: translateY(20px);
+            animation: reviewFadeIn 0.45s ease forwards;
+        }
+
+        @keyframes reviewFadeIn {
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .review-card:hover {
+            border-color: var(--border-color-hover);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .review-header {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-xs);
+        }
+
+        .review-pfp {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid var(--border-color);
+            flex-shrink: 0;
+            background: var(--bg-secondary);
+        }
+
+        .review-pfp-placeholder {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: var(--font-size-lg);
+            font-weight: var(--font-weight-semibold);
+            color: #fff;
+            background: var(--color-primary);
+        }
+
+        .review-meta {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+        }
+
+        .review-meta-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: var(--space-sm);
+        }
+
+        .review-name {
+            font-size: var(--font-size-base);
+            font-weight: var(--font-weight-semibold);
+            color: var(--text-primary);
+        }
+
+        .review-date {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .review-rating {
+            display: flex;
+            align-items: center;
+            gap: 1px;
+        }
+
+        .review-rating svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .review-text {
+            font-size: var(--font-size-base);
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin: var(--space-xs) 0;
+        }
+
+        .review-helpful {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            margin-top: var(--space-xs);
+            padding: 0;
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+            appearance: none;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .review-helpful:hover,
+        .review-helpful:focus-visible,
+        .review-helpful:active {
+            background: transparent;
+            color: var(--text-secondary);
+            outline: none;
+            box-shadow: none;
+        }
+
+        .review-helpful svg {
+            width: 14px;
+            height: 14px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .review-reply {
+            margin-top: var(--space-sm);
+            margin-left: var(--space-lg);
+            padding: var(--space-sm) var(--space-md);
+            background: var(--bg-secondary);
+            border-left: 3px solid var(--color-primary);
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        }
+
+        .review-reply-author {
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-semibold);
+            color: var(--color-primary);
+            margin-bottom: 4px;
+        }
+
+        .review-reply-text {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        .reviews-see-more-wrap {
+            text-align: center;
+            margin-top: var(--space-lg);
+        }
+
+        .reviews-showing {
+            text-align: center;
+            margin-top: var(--space-sm);
+            font-size: var(--font-size-sm);
+            color: var(--text-muted);
+        }
+
+        /* Write-a-review form */
+        .review-form-wrap {
+            max-width: 760px;
+            margin: 0 auto var(--space-xl);
+        }
+
+        .review-form-toggle {
+            width: 100%;
+            text-align: center;
+        }
+
+        .review-form-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: var(--space-lg);
+            box-shadow: var(--shadow-card);
+            display: none;
+        }
+
+        .review-form-card.open {
+            display: block;
+            animation: reviewFadeIn 0.35s ease forwards;
+        }
+
+        .review-form-card h3 {
+            font-size: var(--font-size-xl);
+            margin-bottom: var(--space-md);
+            color: var(--text-primary);
+        }
+
+        .form-group {
+            margin-bottom: var(--space-md);
+        }
+
+        .form-group label {
+            display: block;
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .form-group input[type="text"],
+        .form-group textarea {
+            width: 100%;
+            padding: 10px 14px;
+            font-family: var(--font-family);
+            font-size: var(--font-size-base);
+            color: var(--text-primary);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            outline: none;
+            transition: border-color var(--transition-fast);
+        }
+
+        .form-group input[type="text"]:focus,
+        .form-group textarea:focus {
+            border-color: var(--color-primary);
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        /* Star picker */
+        .star-picker {
+            display: flex;
+            gap: 4px;
+            flex-direction: row-reverse;
+            justify-content: flex-end;
+        }
+
+        .star-picker input {
+            display: none;
+        }
+
+        .star-picker label {
+            cursor: pointer;
+            margin-bottom: 0;
+        }
+
+        .star-picker label svg {
+            width: 28px;
+            height: 28px;
+            fill: var(--text-muted);
+            opacity: 0.35;
+            transition: all var(--transition-fast);
+        }
+
+        .star-picker label:hover svg,
+        .star-picker label:hover ~ label svg,
+        .star-picker input:checked ~ label svg {
+            fill: #facc15;
+            opacity: 1;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: var(--space-sm);
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .form-success {
+            display: none;
+            padding: var(--space-sm) var(--space-md);
+            background: rgba(34,197,94,0.12);
+            color: #22c55e;
+            border-radius: var(--radius-sm);
+            font-size: var(--font-size-sm);
+            font-weight: var(--font-weight-medium);
+            margin-top: var(--space-sm);
+        }
+
+        .form-success.visible {
+            display: block;
+        }
+
+        /* New review highlight */
+        .review-card.user-review {
+            border-color: var(--color-primary);
+            border-width: 2px;
+        }
+
+        .review-new-badge {
+            display: inline-block;
+            font-size: var(--font-size-xs);
+            font-weight: var(--font-weight-semibold);
+            color: var(--color-primary);
+            background: var(--color-primary-glow);
+            padding: 2px 8px;
+            border-radius: var(--radius-sm);
+            margin-left: var(--space-xs);
+        }
+
+        @media (max-width: 768px) {
+            .reviews-overview {
+                flex-direction: column;
+                gap: var(--space-sm);
+            }
+            .review-reply {
+                margin-left: var(--space-sm);
+            }
+            .review-card {
+                padding: var(--space-sm) var(--space-md);
+            }
+            .review-form-card {
+                padding: var(--space-md);
+            }
+            .review-meta-top {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 2px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ============================================
+         NAVIGATION
+         ============================================ -->
+    <header>
+        <nav class="nav" id="navbar">
+            <div class="container nav-inner">
+                <a href="index.html" class="nav-brand">
+                    <!-- Replace images/logo.png with official Tesla InvestCore logo -->
+                    <img src="images/logo.png" alt="Tesla InvestCore Logo" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+
+                <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+
+                <ul class="nav-links" id="navLinks">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Investment Portfolio</a></li>
+                    <li><a href="contact.html">Contact Us</a></li>
+                    <li id="navAuthItem"><a href="auth.html" class="nav-register" id="navAuthLink">Sign In / Register</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+
+        <!-- ============================================
+             HERO SECTION
+             ============================================ -->
+        <section class="hero" id="hero">
+            <div class="hero-bg"></div>
+            <div class="hero-grid"></div>
+            <div class="container hero-content" style="max-width:1100px;">
+                <span class="section-label reveal">Trade 5 Asset Classes With AI</span>
+                <h1 class="reveal reveal-delay-1" style="font-size: var(--font-size-4xl); margin-bottom: var(--space-sm);">
+                    Trade <span class="highlight">Global Markets</span> With AI Precision
+                </h1>
+                <p class="hero-sub reveal reveal-delay-2" style="margin-bottom: var(--space-lg);">
+                    Algorithmic trading across Crypto, Forex, Stocks, Commodities &amp; Real Estate — powered by artificial intelligence.
+                </p>
+
+                <!-- ===== TRADABLE INSTRUMENTS SHOWCASE (above the fold) ===== -->
+                <div class="hero-instruments reveal reveal-delay-3">
+                    <!-- Crypto -->
+                    <a href="portfolio.html" class="hero-instrument-card">
+                        <div class="hero-instr-icon" style="background:rgba(247,147,26,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#f7931a;"><path d="M11.767 19.089c4.924.868 6.14-6.025 1.216-6.894m-1.216 6.894L5.86 18.047m5.908 1.042-.347 1.97m1.563-8.864c4.924.869 6.14-6.025 1.215-6.893m-1.215 6.893-3.94-.694m5.155-6.2L8.29 4.26m5.908 1.042.348-1.97M7.48 20.364l3.126-17.727"/></svg>
+                        </div>
+                        <div class="hero-instr-name">Cryptocurrency</div>
+                        <div class="hero-instr-desc">BTC, ETH &amp; 50+ altcoins</div>
+                        <span class="hero-instr-badge" style="background:rgba(247,147,26,0.12);color:#f7931a;">24/7</span>
+                    </a>
+                    <!-- Forex -->
+                    <a href="portfolio.html" class="hero-instrument-card">
+                        <div class="hero-instr-icon" style="background:rgba(59,130,246,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#3b82f6;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                        </div>
+                        <div class="hero-instr-name">Forex</div>
+                        <div class="hero-instr-desc">50+ major &amp; minor pairs</div>
+                        <span class="hero-instr-badge" style="background:rgba(59,130,246,0.12);color:#3b82f6;">50+ Pairs</span>
+                    </a>
+                    <!-- Stocks -->
+                    <a href="portfolio.html" class="hero-instrument-card">
+                        <div class="hero-instr-icon" style="background:rgba(34,197,94,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#22c55e;"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                        </div>
+                        <div class="hero-instr-name">Stocks</div>
+                        <div class="hero-instr-desc">NYSE, NASDAQ &amp; global</div>
+                        <span class="hero-instr-badge" style="background:rgba(34,197,94,0.12);color:#22c55e;">Equities</span>
+                    </a>
+                    <!-- Commodities -->
+                    <a href="portfolio.html" class="hero-instrument-card">
+                        <div class="hero-instr-icon" style="background:rgba(234,179,8,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#eab308;"><path d="M6 3h12l4 6-10 13L2 9z"/><path d="M11 3l1 6"/><path d="M12 3l-1 6"/><path d="M2 9h20"/><path d="m6 3-4 6 10 13"/><path d="m18 3 4 6-10 13"/></svg>
+                        </div>
+                        <div class="hero-instr-name">Commodities</div>
+                        <div class="hero-instr-desc">Gold, oil &amp; energy</div>
+                        <span class="hero-instr-badge" style="background:rgba(234,179,8,0.12);color:#eab308;">Metals</span>
+                    </a>
+                    <!-- Real Estate -->
+                    <a href="portfolio.html" class="hero-instrument-card">
+                        <div class="hero-instr-icon" style="background:rgba(168,85,247,0.12);">
+                            <svg viewBox="0 0 24 24" style="stroke:#a855f7;"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/><path d="M9 9v.01"/><path d="M9 12v.01"/><path d="M9 15v.01"/><path d="M9 18v.01"/></svg>
+                        </div>
+                        <div class="hero-instr-name">Real Estate</div>
+                        <div class="hero-instr-desc">REITs &amp; property funds</div>
+                        <span class="hero-instr-badge" style="background:rgba(168,85,247,0.12);color:#a855f7;">REITs</span>
+                    </a>
+                </div>
+
+                <div class="hero-actions reveal reveal-delay-4" style="margin-top: var(--space-lg);">
+                    <a href="auth.html?mode=register" class="btn btn-primary">
+                        Start Trading Now
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                    </a>
+                    <a href="portfolio.html" class="btn btn-secondary">View Portfolio</a>
+                </div>
+                <div class="hero-stats reveal reveal-delay-5">
+                    <div class="hero-stat">
+                        <div class="hero-stat-value">$100</div>
+                        <div class="hero-stat-label">Minimum Deposit</div>
+                    </div>
+                    <div class="hero-stat">
+                        <div class="hero-stat-value">5</div>
+                        <div class="hero-stat-label">Asset Classes</div>
+                    </div>
+                    <div class="hero-stat">
+                        <div class="hero-stat-value">24/7</div>
+                        <div class="hero-stat-label">AI Monitoring</div>
+                    </div>
+                    <div class="hero-stat">
+                        <div class="hero-stat-value">20%</div>
+                        <div class="hero-stat-label">Performance Fee</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             HOW IT WORKS
+             ============================================ -->
+        <section class="section section-alt" id="how-it-works">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Process</span>
+                    <h2 class="reveal reveal-delay-1">How It Works</h2>
+                    <p class="reveal reveal-delay-2">Four straightforward steps to access AI-driven trading across multiple asset classes.</p>
+                </div>
+                <div class="steps-grid">
+                    <!-- Step 1 -->
+                    <div class="card step-card reveal reveal-delay-1">
+                        <div class="step-number">1</div>
+                        <div class="card-icon" style="margin:0 auto var(--space-sm)">
+                            <!-- Icon: User/Account -->
+                            <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        </div>
+                        <h3>Create Account</h3>
+                        <p>Register with your personal details and complete identity verification through our secure onboarding process.</p>
+                    </div>
+                    <!-- Step 2 -->
+                    <div class="card step-card reveal reveal-delay-2">
+                        <div class="step-number">2</div>
+                        <div class="card-icon" style="margin:0 auto var(--space-sm)">
+                            <!-- Icon: Wallet/Fund -->
+                            <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 10h20"/><circle cx="17" cy="15" r="1.5"/></svg>
+                        </div>
+                        <h3>Fund Portfolio</h3>
+                        <p>Deposit a minimum of $100 to begin. Funds are allocated across Crypto, Forex, Stocks, Commodities, and Real Estate according to structured risk parameters.</p>
+                    </div>
+                    <!-- Step 3 -->
+                    <div class="card step-card reveal reveal-delay-3">
+                        <div class="step-number">3</div>
+                        <div class="card-icon card-icon-accent" style="margin:0 auto var(--space-sm)">
+                            <!-- Icon: CPU/AI -->
+                            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 15h3"/><path d="M1 9h3"/><path d="M1 15h3"/></svg>
+                        </div>
+                        <h3>Activate AI Strategy</h3>
+                        <p>Select your preferred risk tier and asset classes. The AI system begins executing trades based on real-time market analysis across global markets.</p>
+                    </div>
+                    <!-- Step 4 -->
+                    <div class="card step-card reveal reveal-delay-4">
+                        <div class="step-number">4</div>
+                        <div class="card-icon" style="margin:0 auto var(--space-sm)">
+                            <!-- Icon: Chart/Monitor -->
+                            <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 14 4-4 4 4 5-5"/></svg>
+                        </div>
+                        <h3>Monitor Performance</h3>
+                        <p>Track returns, review trade history, and manage withdrawals through your personal dashboard.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             MARKETS / ASSET CLASSES
+             ============================================ -->
+        <section class="section" id="markets">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Markets</span>
+                    <h2 class="reveal reveal-delay-1">Trade Across Global Markets</h2>
+                    <p class="reveal reveal-delay-2">Our AI engine operates across five major asset classes, diversifying risk and maximizing opportunities worldwide.</p>
+                </div>
+                <div class="markets-grid">
+                    <!-- Crypto -->
+                    <div class="card market-card reveal reveal-delay-1">
+                        <div class="card-icon" style="margin:0 auto var(--space-sm); border-radius: 50%; width:64px; height:64px;">
+                            <!-- Icon: Bitcoin/Crypto -->
+                            <svg viewBox="0 0 24 24"><path d="M11.767 19.089c4.924.868 6.14-6.025 1.216-6.894m-1.216 6.894L5.86 18.047m5.908 1.042-.347 1.97m1.563-8.864c4.924.869 6.14-6.025 1.215-6.893m-1.215 6.893-3.94-.694m5.155-6.2L8.29 4.26m5.908 1.042.348-1.97M7.48 20.364l3.126-17.727"/></svg>
+                        </div>
+                        <h3>Cryptocurrency</h3>
+                        <p>Trade Bitcoin, Ethereum, and 50+ altcoins across major exchanges with AI-powered timing and risk management.</p>
+                        <span class="market-tag">24/7 Trading</span>
+                    </div>
+                    <!-- Forex -->
+                    <div class="card market-card reveal reveal-delay-2">
+                        <div class="card-icon card-icon-accent" style="margin:0 auto var(--space-sm); border-radius: 50%; width:64px; height:64px;">
+                            <!-- Icon: Currency/Globe -->
+                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                        </div>
+                        <h3>Forex</h3>
+                        <p>Access major, minor, and exotic currency pairs. AI algorithms exploit micro-movements in the $7.5 trillion daily forex market.</p>
+                        <span class="market-tag market-tag-accent">50+ Pairs</span>
+                    </div>
+                    <!-- Stocks -->
+                    <div class="card market-card reveal reveal-delay-3">
+                        <div class="card-icon" style="margin:0 auto var(--space-sm); border-radius: 50%; width:64px; height:64px;">
+                            <!-- Icon: Trending Up / Stocks -->
+                            <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                        </div>
+                        <h3>Stocks</h3>
+                        <p>AI-selected equities from NYSE, NASDAQ, and global exchanges. Fundamental and technical analysis combined for optimal entries.</p>
+                        <span class="market-tag">Global Equities</span>
+                    </div>
+                    <!-- Commodities -->
+                    <div class="card market-card reveal reveal-delay-4">
+                        <div class="card-icon card-icon-accent" style="margin:0 auto var(--space-sm); border-radius: 50%; width:64px; height:64px;">
+                            <!-- Icon: Diamond/Commodity -->
+                            <svg viewBox="0 0 24 24"><path d="M6 3h12l4 6-10 13L2 9z"/><path d="M11 3l1 6"/><path d="M12 3l-1 6"/><path d="M2 9h20"/><path d="m6 3-4 6 10 13"/><path d="m18 3 4 6-10 13"/></svg>
+                        </div>
+                        <h3>Commodities</h3>
+                        <p>Trade gold, silver, oil, natural gas, and agricultural futures. AI detects supply-demand imbalances and macro-economic shifts.</p>
+                        <span class="market-tag market-tag-accent">Precious Metals & Energy</span>
+                    </div>
+                    <!-- Real Estate -->
+                    <div class="card market-card reveal reveal-delay-5">
+                        <div class="card-icon" style="margin:0 auto var(--space-sm); border-radius: 50%; width:64px; height:64px;">
+                            <!-- Icon: Building/Real Estate -->
+                            <svg viewBox="0 0 24 24"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/><path d="M9 9v.01"/><path d="M9 12v.01"/><path d="M9 15v.01"/><path d="M9 18v.01"/></svg>
+                        </div>
+                        <h3>Real Estate</h3>
+                        <p>AI-powered analysis of global real estate markets, REITs, and property-backed securities. Data-driven selection for stable, income-generating portfolios.</p>
+                        <span class="market-tag">REITs & Property</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             TECHNOLOGY SECTION
+             ============================================ -->
+        <section class="section" id="technology">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Technology</span>
+                    <h2 class="reveal reveal-delay-1">Proprietary AI Analysis</h2>
+                    <p class="reveal reveal-delay-2">Our trading engine processes multiple data streams simultaneously to identify opportunities across cryptocurrency, forex, equity, commodity, and real estate markets.</p>
+                </div>
+                <div class="tech-layout">
+                    <div class="reveal">
+                        <!-- Replace images/ai-trading.jpg with actual AI trading image -->
+                        <div class="tech-image-wrap">
+                            <img src="images/ai-trading.jpg" alt="AI Trading Technology Dashboard" loading="lazy">
+                        </div>
+                    </div>
+                    <div class="tech-list">
+                        <div class="tech-item reveal reveal-delay-1">
+                            <div class="tech-item-icon">
+                                <!-- Icon: Bar chart / Market data -->
+                                <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8" rx="1"/><rect x="14" y="6" width="3" height="12" rx="1"/></svg>
+                            </div>
+                            <div class="tech-item-text">
+                                <h4>Market Data Processing</h4>
+                                <p>Real-time analysis of price action, order book depth, and historical patterns across major crypto exchanges, forex pairs, stock markets, commodity indices, and real estate markets.</p>
+                            </div>
+                        </div>
+                        <div class="tech-item reveal reveal-delay-2">
+                            <div class="tech-item-icon">
+                                <!-- Icon: Newspaper / News signals -->
+                                <svg viewBox="0 0 24 24"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></svg>
+                            </div>
+                            <div class="tech-item-text">
+                                <h4>News Signal Analysis</h4>
+                                <p>Natural language processing monitors global news feeds, earnings reports, central bank announcements, and social sentiment to detect market-moving events across all asset classes including real estate.</p>
+                            </div>
+                        </div>
+                        <div class="tech-item reveal reveal-delay-3">
+                            <div class="tech-item-icon">
+                                <!-- Icon: Activity / Volatility -->
+                                <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                            </div>
+                            <div class="tech-item-text">
+                                <h4>Cross-Market Volatility Assessment</h4>
+                                <p>Continuous measurement of volatility across crypto, forex, equity, commodity, and real estate markets to dynamically adjust position sizing and exposure limits in real time.</p>
+                            </div>
+                        </div>
+                        <div class="tech-item reveal reveal-delay-4">
+                            <div class="tech-item-icon">
+                                <!-- Icon: Droplet / Liquidity -->
+                                <svg viewBox="0 0 24 24"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+                            </div>
+                            <div class="tech-item-text">
+                                <h4>Liquidity & Capital Flow Tracking</h4>
+                                <p>Monitors capital movement across exchanges, currency pairs, equity sectors, commodity futures, and real estate investments to identify institutional flows and emerging trends globally.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             PERFORMANCE MODEL
+             ============================================ -->
+        <section class="section section-alt" id="performance">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Investment Terms</span>
+                    <h2 class="reveal reveal-delay-1">Performance Model</h2>
+                    <p class="reveal reveal-delay-2">Transparent fee structure designed to align our incentives with your results.</p>
+                </div>
+                <div class="perf-grid">
+                    <div class="card perf-card reveal reveal-delay-1">
+                        <div class="card-icon">
+                            <!-- Icon: Dollar sign -->
+                            <svg viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                        </div>
+                        <div class="perf-value">$100</div>
+                        <h3>Minimum Deposit</h3>
+                        <p class="perf-detail">Begin investing with as little as one hundred dollars. Capital is allocated proportionally across active AI strategies spanning Crypto, Forex, Stocks, Commodities, and Real Estate.</p>
+                    </div>
+                    <div class="card perf-card reveal reveal-delay-2">
+                        <div class="card-icon card-icon-accent">
+                            <!-- Icon: Percent -->
+                            <svg viewBox="0 0 24 24"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>
+                        </div>
+                        <div class="perf-value">20%</div>
+                        <h3>Performance Fee</h3>
+                        <p class="perf-detail">Tesla InvestCore charges a 20% performance fee on cumulative net profits only. No management fees or hidden charges.</p>
+                    </div>
+                    <div class="card perf-card reveal reveal-delay-3">
+                        <div class="card-icon">
+                            <!-- Icon: Calendar -->
+                            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        </div>
+                        <div class="perf-value">7 Days</div>
+                        <h3>Minimum Period</h3>
+                        <p class="perf-detail">A minimum participation period of 7 days applies to allow the AI strategy adequate time to execute its trading cycle.</p>
+                    </div>
+                    <div class="card perf-card reveal reveal-delay-1">
+                        <div class="card-icon">
+                            <!-- Icon: Clock -->
+                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        </div>
+                        <div class="perf-value">3-7 Days</div>
+                        <h3>Withdrawal Processing</h3>
+                        <p class="perf-detail">Withdrawal requests are processed within 3 to 7 business days after the minimum participation period has elapsed.</p>
+                    </div>
+                    <div class="card perf-card reveal reveal-delay-2">
+                        <div class="card-icon card-icon-accent">
+                            <!-- Icon: Shield -->
+                            <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        </div>
+                        <div class="perf-value">Aligned</div>
+                        <h3>Fee Alignment</h3>
+                        <p class="perf-detail">Our fee-only-on-profit model ensures Tesla InvestCore earns only when your portfolio generates positive returns.</p>
+                    </div>
+                    <div class="card perf-card reveal reveal-delay-3">
+                        <div class="card-icon card-icon-accent">
+                            <!-- Icon: Shield check -->
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                        </div>
+                        <div class="perf-value">Guaranteed</div>
+                        <h3>Performance Promise</h3>
+                        <p class="perf-detail">Tesla InvestCore's AI engine is built to deliver — engineered for consistent, optimized returns across every asset class, every hour of every day.</p>
+                    </div>
+                </div>
+                <div class="perf-notice reveal">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                    <p>Tesla InvestCore leverages cutting-edge AI to maximize returns across crypto, forex, stocks, commodities, and real estate. Your investments are actively managed for growth every hour of every day.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             LEADERSHIP SECTION
+             ============================================ -->
+        <section class="section" id="leadership">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Leadership</span>
+                    <h2 class="reveal reveal-delay-1">Executive Team</h2>
+                    <p class="reveal reveal-delay-2">Experienced leadership guiding Tesla InvestCore's technology and operations.</p>
+                </div>
+                <div class="leader-layout">
+                    <div class="reveal">
+                        <!-- Replace images/ceo.jpg with actual CEO image -->
+                        <div class="leader-image-wrap">
+                            <img src="images/ceo.jpg" alt="Ronald A. Peters — CEO, Tesla InvestCore" loading="lazy">
+                        </div>
+                    </div>
+                    <div class="leader-info reveal reveal-delay-1">
+                        <h3>Ronald A. Peters</h3>
+                        <div class="leader-title">Chief Executive Officer, Tesla InvestCore</div>
+                        <p>
+                            Ronald A. Peters brings over two decades of experience in quantitative finance and technology leadership to Tesla InvestCore. 
+                            His career spans senior roles at institutional asset management firms and fintech startups, where he directed the development 
+                            of algorithmic trading systems across cryptocurrency, forex, equities, commodity, and real estate markets.
+                        </p>
+                        <p>
+                            Under his leadership, Tesla InvestCore has built a proprietary AI engine that combines machine learning, real-time market analytics, 
+                            and risk management protocols to deliver a structured approach to multi-asset trading. Ronald is committed to operational 
+                            transparency, regulatory compliance, and responsible innovation in digital and traditional asset management.
+                        </p>
+                        <a href="about.html" class="btn btn-secondary btn-sm" style="margin-top: var(--space-sm);">
+                            Read Full Bio
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             INFRASTRUCTURE SECTION
+             ============================================ -->
+        <section class="section section-alt" id="infrastructure">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Operations</span>
+                    <h2 class="reveal reveal-delay-1">Secure Infrastructure</h2>
+                    <p class="reveal reveal-delay-2">Enterprise-grade security and operational transparency at every level.</p>
+                </div>
+                <div class="infra-layout">
+                    <div class="infra-list">
+                        <div class="infra-item reveal reveal-delay-1">
+                            <div class="infra-item-icon">
+                                <!-- Icon: Lock -->
+                                <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div class="infra-item-text">
+                                <h4>End-to-End Encryption</h4>
+                                <p>All data transmissions are protected with AES-256 encryption. Account credentials and personal information are secured with industry-standard cryptographic protocols.</p>
+                            </div>
+                        </div>
+                        <div class="infra-item reveal reveal-delay-2">
+                            <div class="infra-item-icon">
+                                <!-- Icon: Server -->
+                                <svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                            </div>
+                            <div class="infra-item-text">
+                                <h4>Redundant Systems</h4>
+                                <p>Trading infrastructure operates across geographically distributed data centers with automated failover. System uptime targets exceed 99.9% availability.</p>
+                            </div>
+                        </div>
+                        <div class="infra-item reveal reveal-delay-3">
+                            <div class="infra-item-icon">
+                                <!-- Icon: Eye -->
+                                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </div>
+                            <div class="infra-item-text">
+                                <h4>Operational Transparency</h4>
+                                <p>Full audit trail of all trading activity. Detailed reporting on portfolio performance, fee calculations, and withdrawal history available through the client dashboard.</p>
+                            </div>
+                        </div>
+                        <div class="infra-item reveal reveal-delay-4">
+                            <div class="infra-item-icon">
+                                <!-- Icon: Shield check -->
+                                <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                            </div>
+                            <div class="infra-item-text">
+                                <h4>Compliance Framework</h4>
+                                <p>Operations adhere to regulatory standards and best practices for digital and traditional asset management, including KYC/AML procedures and secure fund custody.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="reveal">
+                        <!-- Replace images/office.jpg with actual office image -->
+                        <div class="infra-image-wrap">
+                            <img src="images/office.jpg" alt="Tesla InvestCore Corporate Office" loading="lazy">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             PLATFORM OVERVIEW (VIDEO)
+             ============================================ -->
+        <section class="section" id="platform-overview">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Platform</span>
+                    <h2 class="reveal reveal-delay-1">Platform Overview</h2>
+                    <p class="reveal reveal-delay-2">See how Tesla InvestCore's AI multi-asset trading platform works in practice.</p>
+                </div>
+                <div class="reveal">
+                    <!-- Replace the YouTube  link below with Tesla InvestCore official video -->
+                    <div class="video-wrapper">
+                        <iframe
+                            src="https://www.youtube.com/embed/AZSknKd9W4o?start=41"
+                            title="Tesla InvestCore Platform Overview"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowfullscreen
+                            loading="lazy"
+                        ></iframe>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================
+             TESTIMONIALS / REVIEWS SECTION
+             ============================================ -->
+        <section class="section section-alt" id="reviews">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Testimonials</span>
+                    <h2 class="reveal reveal-delay-1">What Our Users Say</h2>
+                    <p class="reveal reveal-delay-2">Real feedback from investors using our AI-driven multi-asset platform.</p>
+                </div>
+
+                <!-- Overall Rating (dynamically calculated from REVIEWS_DATA) -->
+                <div class="reviews-overview reveal">
+                    <div class="reviews-score">
+                        <div class="reviews-score-number" id="reviewsAvgRating">—</div>
+                        <div class="reviews-stars-row" id="reviewsStarsRow">
+                            <!-- Stars rendered dynamically by JS -->
+                        </div>
+                        <div class="reviews-count" id="reviewsTotalCount">Loading reviews…</div>
+                    </div>
+                </div>
+
+                <!-- Write a Review -->
+                <div class="review-form-wrap reveal">
+                    <button class="btn btn-secondary review-form-toggle" id="writeReviewToggle">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                        Write a Review
+                    </button>
+                    <div class="review-form-card" id="reviewFormCard">
+                        <h3>Share Your Experience</h3>
+                        <div id="reviewAuthGate" style="display:none; padding:16px; background:rgba(127,29,29,0.2); border:1px solid rgba(239,68,68,0.2); border-radius:var(--radius-sm); margin-bottom:16px; font-size:var(--font-size-sm); color:var(--text-secondary);">
+                            <i class="fas fa-lock" style="margin-right:6px; color:var(--color-primary);"></i>
+                            Please <a href="auth.html" style="color:var(--color-accent); text-decoration:underline;">log in</a> and complete your profile before writing a review.
+                        </div>
+                        <form id="reviewForm" autocomplete="off">
+                            <div class="form-group">
+                                <label>Your Rating</label>
+                                <div class="star-picker" id="starPicker">
+                                    <input type="radio" name="rating" id="star5" value="5"><label for="star5"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg></label>
+                                    <input type="radio" name="rating" id="star4" value="4"><label for="star4"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg></label>
+                                    <input type="radio" name="rating" id="star3" value="3"><label for="star3"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg></label>
+                                    <input type="radio" name="rating" id="star2" value="2"><label for="star2"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg></label>
+                                    <input type="radio" name="rating" id="star1" value="1"><label for="star1"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg></label>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="reviewerText">Your Review</label>
+                                <textarea id="reviewerText" placeholder="What was your experience with Tesla InvestCore?" required maxlength="1000"></textarea>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" id="reviewSubmitButton" class="btn btn-primary btn-sm">Submit Review</button>
+                                <button type="button" class="btn btn-secondary btn-sm" id="cancelReview">Cancel</button>
+                            </div>
+                            <div class="form-success" id="formSuccess">✓ Thank you! Your review has been posted.</div>
+                            <div id="reviewFormStatus" style="display:none; margin-top:10px; padding: 10px 12px; border-radius: var(--radius-sm); font-size: var(--font-size-sm);"></div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Dynamic Reviews List (rendered by JS) -->
+                <div class="reviews-list" id="reviewsList"></div>
+
+                <!-- Show More + Counter -->
+                <div class="reviews-see-more-wrap reveal">
+                    <button class="btn btn-secondary" id="reviewsSeeMore">
+                        Show More Reviews
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="reviews-showing" id="reviewsShowing"></div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- ============================================
+             CONTACT SECTION
+             ============================================ -->
+        <section class="section" id="contact">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-label reveal">Contact</span>
+                    <h2 class="reveal reveal-delay-1">Get In Touch</h2>
+                    <p class="reveal reveal-delay-2">Reach out to our team for inquiries, partnership opportunities, or support.</p>
+                </div>
+                <div class="contact-card card reveal">
+                    <div class="contact-icon">
+                        <!-- Icon: Map pin -->
+                        <svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    </div>
+                    <address class="contact-address">
+                        <strong>Tesla InvestCore Headquarters</strong>
+                        30 West Superior Street<br>
+                        Duluth, MN 55802<br>
+                        United States of America
+                    </address>
+                    <div style="margin-top: var(--space-md); display: flex; gap: var(--space-sm); justify-content: center; flex-wrap: wrap;">
+                        <a href="contact.html" class="btn btn-primary btn-sm">
+                            Contact Us
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                        </a>
+                        <a href="about.html" class="btn btn-secondary btn-sm">About Tesla InvestCore</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ============================================
+         FOOTER
+         ============================================ -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-top">
+                <a href="index.html" class="footer-brand">
+                    <!-- Replace images/logo.png with official Tesla InvestCore logo -->
+                    <img src="images/logo.png" alt="Tesla InvestCore" onerror="this.style.display='none'">
+                    <span>Tesla Invest<span class="brand-gradient">Core</span></span>
+                </a>
+                <ul class="footer-links">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About Us</a></li>
+                    <li><a href="portfolio.html">Portfolio</a></li>
+                    <li><a href="contact.html">Contact</a></li>
+                    <li><a href="auth.html" id="footerAuthLink">Login / Register</a></li>
+                </ul>
+            </div>
+
+            <div class="footer-disclosure">
+                <p>
+                    <strong style="color: var(--color-error); font-weight: var(--font-weight-semibold);">Risk Disclosure:</strong>
+                    Tesla InvestCore is committed to delivering consistent returns through AI-powered precision trading across all major asset classes. 
+                    Our advanced algorithms continuously optimize every portfolio for maximum growth. Your capital is actively protected and managed around the clock across crypto, forex, stocks, commodities, and real estate.
+                </p>
+            </div>
+
+            <div style="display:flex; gap: var(--space-md); margin-bottom: var(--space-md); flex-wrap: wrap;">
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Privacy Policy</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Terms of Service</a>
+                <a href="#" style="color: var(--text-muted); font-size: var(--font-size-xs);">Risk Disclosure</a>
+            </div>
+
+            <div class="footer-bottom">
+                &copy; 2026 Tesla InvestCore. All rights reserved.
+            </div>
+
+            <div class="footer-powered-by">
+                <span>Powered by</span>
+                <img src="images/glencore-logo.png" alt="Glencore" loading="lazy">
+            </div>
+        </div>
+    </footer>
+
+    <!-- ============================================
+         JAVASCRIPT
+         ============================================ -->
+    <script>
+        (function() {
+            'use strict';
+
+            /* ==========================================
+               MOBILE NAVIGATION TOGGLE
+               ========================================== */
+            const navToggle = document.getElementById('navToggle');
+            const navLinks = document.getElementById('navLinks');
+
+            navToggle.addEventListener('click', function() {
+                navToggle.classList.toggle('active');
+                navLinks.classList.toggle('open');
+            });
+
+            // Close nav when clicking a link on mobile
+            navLinks.querySelectorAll('a').forEach(function(link) {
+                link.addEventListener('click', function() {
+                    navToggle.classList.remove('active');
+                    navLinks.classList.remove('open');
+                });
+            });
+
+            // Close nav when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!navToggle.contains(e.target) && !navLinks.contains(e.target)) {
+                    navToggle.classList.remove('active');
+                    navLinks.classList.remove('open');
+                }
+            });
+
+            /* ==========================================
+               SMOOTH SCROLL FOR ANCHOR LINKS
+               ========================================== */
+            document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
+                anchor.addEventListener('click', function(e) {
+                    var targetId = this.getAttribute('href');
+                    if (targetId === '#') return;
+                    var target = document.querySelector(targetId);
+                    if (target) {
+                        e.preventDefault();
+                        var navHeight = document.querySelector('.nav').offsetHeight;
+                        var targetPosition = target.getBoundingClientRect().top + window.pageYOffset - navHeight;
+                        window.scrollTo({
+                            top: targetPosition,
+                            behavior: 'smooth'
+                        });
+                    }
+                });
+            });
+
+            /* ==========================================
+               SCROLL REVEAL ANIMATION
+               ========================================== */
+            var revealElements = document.querySelectorAll('.reveal');
+
+            function revealOnScroll() {
+                var windowHeight = window.innerHeight;
+                revealElements.forEach(function(el) {
+                    var elementTop = el.getBoundingClientRect().top;
+                    var revealPoint = windowHeight - 80;
+                    if (elementTop < revealPoint) {
+                        el.classList.add('visible');
+                    }
+                });
+            }
+
+            // Initial check
+            revealOnScroll();
+
+            // Throttled scroll listener
+            var scrollTimer = null;
+            window.addEventListener('scroll', function() {
+                if (scrollTimer !== null) return;
+                scrollTimer = setTimeout(function() {
+                    revealOnScroll();
+                    scrollTimer = null;
+                }, 50);
+            }, { passive: true });
+
+            /* ==========================================
+               NAVBAR BACKGROUND ON SCROLL
+               ========================================== */
+            var navbar = document.getElementById('navbar');
+
+            function updateNav() {
+                if (window.scrollY > 20) {
+                    navbar.style.borderBottomColor = 'var(--border-color-hover)';
+                } else {
+                    navbar.style.borderBottomColor = 'var(--border-color)';
+                }
+            }
+
+            window.addEventListener('scroll', updateNav, { passive: true });
+            updateNav();
+
+            /* ==========================================
+               REVIEWS — DYNAMIC RENDERING + PAGINATION
+               ========================================== */
+            var STAR_FILLED = '<svg viewBox="0 0 24 24" fill="#facc15" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>';
+            var STAR_EMPTY  = '<svg viewBox="0 0 24 24" fill="#64748b" fill-opacity="0.35" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>';
+            var THUMB_ICON  = '<svg viewBox="0 0 24 24"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14zM4 22H2V11h2z"/></svg>';
+
+            var staticReviews = (window.InvestCoreReviews && typeof window.InvestCoreReviews.getStaticReviews === 'function') ? window.InvestCoreReviews.getStaticReviews() : (window.InvestCoreStaticReviews || []);
+            console.log('Initial static reviews detected:', staticReviews.length);
+            var allReviews = staticReviews.slice();
+            var userReviews = [];
+            var PAGE_SIZE = 10;
+            var currentPage = 0;
+
+            var reviewsList = document.getElementById('reviewsList');
+            var seeMoreBtn = document.getElementById('reviewsSeeMore');
+            var showingEl = document.getElementById('reviewsShowing');
+            var totalCountEl = document.getElementById('reviewsTotalCount');
+            var avgRatingEl = document.getElementById('reviewsAvgRating');
+            var starsRowEl = document.getElementById('reviewsStarsRow');
+
+            /* ---------- Dynamic rating calculation ---------- */
+            function getMergedDisplayReviews() {
+                var combined = allReviews.concat(userReviews);
+                var seen = new Set();
+                return combined.filter(function(review) {
+                    var key = String(review && review.id != null ? review.id : '');
+                    if (!key || seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
+            }
+
+            function calcAndRenderOverview() {
+                var all = getMergedDisplayReviews();
+                var total = all.length;
+                if (total === 0) {
+                    avgRatingEl.textContent = '—';
+                    starsRowEl.innerHTML = '';
+                    totalCountEl.textContent = 'No reviews yet';
+                    return;
+                }
+
+                var sum = 0;
+                for (var i = 0; i < total; i++) { sum += all[i].rating; }
+                var avg = sum / total;
+                var avgRounded = Math.round(avg * 10) / 10; // e.g. 4.6
+
+                // Display the number
+                avgRatingEl.textContent = avgRounded.toFixed(1);
+
+                // Build star SVGs based on the actual average
+                var starPath = 'M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z';
+                var html = '';
+                for (var s = 1; s <= 5; s++) {
+                    if (avg >= s) {
+                        // Full star
+                        html += '<svg viewBox="0 0 24 24" fill="#facc15" stroke="none"><path d="' + starPath + '"/></svg>';
+                    } else if (avg >= s - 0.75) {
+                        // Partial star — compute fill percentage
+                        var pct = Math.round((avg - (s - 1)) * 100);
+                        var gid = 'partialStar' + s;
+                        html += '<svg viewBox="0 0 24 24" fill="none" stroke="none">' +
+                            '<defs><linearGradient id="' + gid + '"><stop offset="' + pct + '%" stop-color="#facc15"/><stop offset="' + pct + '%" stop-color="#64748b" stop-opacity="0.35"/></linearGradient></defs>' +
+                            '<path d="' + starPath + '" fill="url(#' + gid + ')"/></svg>';
+                    } else {
+                        // Empty star
+                        html += '<svg viewBox="0 0 24 24" fill="#64748b" fill-opacity="0.35" stroke="none"><path d="' + starPath + '"/></svg>';
+                    }
+                }
+                starsRowEl.innerHTML = html;
+
+                // Update total text
+                totalCountEl.textContent = 'Based on ' + total + ' reviews';
+            }
+
+            // Initial calculation
+            calcAndRenderOverview();
+
+            function starsHtml(rating) {
+                var s = '';
+                for (var i = 1; i <= 5; i++) {
+                    s += (i <= rating) ? STAR_FILLED : STAR_EMPTY;
+                }
+                return s;
+            }
+
+            function buildReviewCard(r, isUser, cardIndex) {
+                var card = document.createElement('div');
+                card.className = 'review-card' + (isUser ? ' user-review' : '');
+                // Deterministic stagger based on position within the page batch
+                card.style.animationDelay = ((cardIndex % PAGE_SIZE) * 0.04) + 's';
+
+                var pfpHtml;
+                if (isUser || !r.hasAvatar) {
+                    // Show initials placeholder — most real users don't set avatars
+                    var initials = r.name.charAt(0).toUpperCase();
+                    var bgColor = r.avatarColor || 'var(--color-primary)';
+                    pfpHtml = '<div class="review-pfp-placeholder" style="background:' + bgColor + '">' + initials + '</div>';
+                } else {
+                    pfpHtml = '<img class="review-pfp" src="https://i.pravatar.cc/88?img=' + r.avatarId + '" alt="' + r.name + '" loading="lazy" onerror="this.outerHTML=\'<div class=review-pfp-placeholder style=background:' + (r.avatarColor || '#6366f1').replace('#','%23') + '>' + r.name.charAt(0).toUpperCase() + '</div>\'">';
+                }
+
+                var helpfulHtml = '';
+                var helpfulCount = Number(r.helpful_count || r.helpful || 0);
+                var helpfulLabel = helpfulCount > 0
+                    ? helpfulCount + ' people found this helpful'
+                    : 'Found this helpful?';
+                helpfulHtml = '<button class="review-helpful" data-helpful-review="' + r.id + '" data-hive-id="' + (r.hiveId || '') + '">' + THUMB_ICON + '<span>' + helpfulLabel + '</span></button>';
+
+                var replyHtml = '';
+                if (r.reply) {
+                    replyHtml = '<div class="review-reply"><div class="review-reply-author">Tesla InvestCore Support</div><div class="review-reply-text">' + r.reply + '</div></div>';
+                }
+
+                var badgeHtml = isUser ? '<span class="review-new-badge">New</span>' : '';
+
+                card.innerHTML =
+                    '<div class="review-header">' +
+                        pfpHtml +
+                        '<div class="review-meta">' +
+                            '<div class="review-meta-top">' +
+                                '<span class="review-name">' + r.name + badgeHtml + '</span>' +
+                                '<span class="review-date">' + (r.date || new Date(r.created_at).toLocaleDateString()) + '</span>' +
+                            '</div>' +
+                            '<div class="review-rating">' + starsHtml(r.rating) + '</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<p class="review-text">' + r.text + '</p>' +
+                    helpfulHtml +
+                    replyHtml;
+
+                return card;
+            }
+
+            function getTotalCount() {
+                return getMergedDisplayReviews().length;
+            }
+
+            function getDisplayed() {
+                return Math.min((currentPage + 1) * PAGE_SIZE, getMergedDisplayReviews().length);
+            }
+
+            function updateCounter() {
+                var total = getTotalCount();
+                var shown = getDisplayed();
+                showingEl.textContent = 'Showing ' + shown + ' of ' + total + ' reviews';
+                bindHelpfulButtons();
+
+                // Recalculate average rating and stars from live data
+                calcAndRenderOverview();
+
+                if (shown >= total) {
+                    seeMoreBtn.style.display = 'none';
+                } else {
+                    seeMoreBtn.style.display = '';
+                }
+            }
+
+            function renderPage() {
+                var displayReviews = getMergedDisplayReviews();
+                var start = currentPage * PAGE_SIZE;
+                var end = Math.min(start + PAGE_SIZE, displayReviews.length);
+                for (var i = start; i < end; i++) {
+                    reviewsList.appendChild(buildReviewCard(displayReviews[i], displayReviews[i] && displayReviews[i].source === 'supabase' && displayReviews[i].approved === false, i));
+                }
+                console.log('Rendering reviews page:', { currentPage: currentPage, pageSize: PAGE_SIZE, totalDisplayReviews: displayReviews.length, start: start, end: end });
+                updateCounter();
+            }
+
+            // Initial load
+            currentPage = 0;
+            renderPage();
+
+            // Show more
+            seeMoreBtn.addEventListener('click', function () {
+                currentPage++;
+                renderPage();
+            });
+
+            /* ==========================================
+               REVIEWS — WRITE A REVIEW FORM
+               ========================================== */
+            var writeToggle = document.getElementById('writeReviewToggle');
+            var formCard = document.getElementById('reviewFormCard');
+            var reviewForm = document.getElementById('reviewForm');
+            var cancelBtn = document.getElementById('cancelReview');
+            var formSuccess = document.getElementById('formSuccess');
+
+            writeToggle.addEventListener('click', async function () {
+                // Check login state before opening the form
+                var auth = await window.InvestCoreSupabase.getCurrentUserAcrossHives();
+                var gate = document.getElementById('reviewAuthGate');
+                if (!auth || !auth.user) {
+                    if (gate) gate.style.display = 'block';
+                } else {
+                    if (gate) gate.style.display = 'none';
+                }
+                formCard.classList.toggle('open');
+                if (formCard.classList.contains('open')) {
+                    writeToggle.style.display = 'none';
+                }
+            });
+
+            cancelBtn.addEventListener('click', function () {
+                formCard.classList.remove('open');
+                writeToggle.style.display = '';
+                formSuccess.classList.remove('visible');
+                reviewForm.reset();
+            });
+
+            var reviewFormStatus = document.getElementById('reviewFormStatus');
+            var reviewSubmitButton = document.getElementById('reviewSubmitButton');
+
+            function setReviewStatus(message, type) {
+                reviewFormStatus.style.display = 'block';
+                reviewFormStatus.textContent = message;
+                reviewFormStatus.style.background = type === 'error' ? 'rgba(127,29,29,0.35)' : 'rgba(34,197,94,0.14)';
+                reviewFormStatus.style.color = type === 'error' ? '#fecaca' : '#bbf7d0';
+            }
+
+            function bindHelpfulButtons() {
+                reviewsList.querySelectorAll('[data-helpful-review]').forEach(function(button) {
+                    if (button.dataset.bound === 'true') return;
+                    button.dataset.bound = 'true';
+                    button.addEventListener('click', async function() {
+                        var btn = this;
+                        var auth = await window.InvestCoreSupabase.getCurrentUserAcrossHives();
+                        if (!auth || !auth.user) {
+                            setReviewStatus('Please log in to mark a review as helpful.', 'error');
+                            return;
+                        }
+                        var reviewId = btn.getAttribute('data-helpful-review');
+                        var hiveId = Number(btn.getAttribute('data-hive-id')) || auth.hiveId;
+
+                        // Update UI immediately (optimistic)
+                        btn.disabled = true;
+                        btn.style.opacity = '0.6';
+                        var spanEl = btn.querySelector('span');
+                        var review = allReviews.concat(userReviews).find(function(item) { return String(item.id) === String(reviewId); });
+                        var currentCount = Number((review && (review.helpful_count || review.helpful || 0)));
+                        var nextCount = currentCount + 1;
+                        if (spanEl) spanEl.textContent = nextCount + ' people found this helpful';
+
+                        // Static reviews have numeric IDs, not UUIDs — skip DB calls to
+                        // avoid "invalid input syntax for type uuid" errors from Postgres.
+                        var isStaticReview = !review || review.source === 'static' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reviewId);
+                        if (isStaticReview) {
+                            if (review) { review.helpful_count = nextCount; review.helpful = nextCount; }
+                            return;
+                        }
+
+                        try {
+                            var client = window.InvestCoreSupabase.getClient({ hiveId: hiveId });
+                            var likeInsert = await client.from('review_likes').insert({ review_id: reviewId, user_id: auth.user.id });
+                            if (likeInsert.error) throw likeInsert.error;
+                            var updateResponse = await client.from('reviews').update({ helpful_count: nextCount }).eq('id', reviewId);
+                            if (updateResponse.error) throw updateResponse.error;
+                            // Update local data
+                            if (review) {
+                                review.helpful_count = nextCount;
+                                review.helpful = nextCount;
+                            }
+                        } catch (error) {
+                            // Revert on error
+                            btn.disabled = false;
+                            btn.style.opacity = '';
+                            if (spanEl) spanEl.textContent = currentCount > 0 ? currentCount + ' people found this helpful' : 'Found this helpful?';
+                            setReviewStatus(error.message || 'Unable to mark review as helpful.', 'error');
+                        }
+                    });
+                });
+            }
+
+            async function hydrateSupabaseReviews() {
+                try {
+                    var dbReviews = await window.InvestCoreSupabase.fetchApprovedReviewsAcrossHives();
+                    var fallbackStaticReviews = (window.InvestCoreReviews && typeof window.InvestCoreReviews.getStaticReviews === 'function') ? window.InvestCoreReviews.getStaticReviews() : (window.InvestCoreStaticReviews || []);
+                    console.log('Hydrating reviews. Static reviews loaded:', fallbackStaticReviews.length, 'Dynamic reviews loaded:', (dbReviews || []).length);
+                    allReviews = window.InvestCoreReviews.mergeReviews(fallbackStaticReviews, dbReviews).map(function(review) {
+                        if (review.created_at) {
+                            review.date = new Date(review.created_at).toLocaleDateString();
+                        }
+                        return review;
+                    });
+                    console.log('Merged review count:', allReviews.length);
+                    reviewsList.innerHTML = '';
+                    currentPage = 0;
+                    renderPage();
+                } catch (error) {
+                    console.error('Review fetch failed:', error);
+                }
+            }
+
+            reviewForm.addEventListener('submit', async function (e) {
+                e.preventDefault();
+
+                var auth = await window.InvestCoreSupabase.getCurrentUserAcrossHives();
+                if (!auth || !auth.user) {
+                    setReviewStatus('Please log in before submitting a review.', 'error');
+                    var gate = document.getElementById('reviewAuthGate');
+                    if (gate) gate.style.display = 'block';
+                    return;
+                }
+
+                // Get name from profile — user must have a completed profile
+                var nameVal = '';
+                try {
+                    var profileResult = await auth.client.from('profiles').select('full_name').eq('user_id', auth.user.id).single();
+                    if (!profileResult.error && profileResult.data && profileResult.data.full_name) {
+                        nameVal = profileResult.data.full_name.trim();
+                    }
+                } catch(e) {}
+                // Fallback to auth metadata
+                if (!nameVal && auth.user.user_metadata && auth.user.user_metadata.full_name) {
+                    nameVal = auth.user.user_metadata.full_name.trim();
+                }
+                if (!nameVal) {
+                    setReviewStatus('Please complete your profile with your full name before submitting a review.', 'error');
+                    var gate2 = document.getElementById('reviewAuthGate');
+                    if (gate2) { gate2.style.display = 'block'; gate2.innerHTML = '<i class="fas fa-user-edit" style="margin-right:6px; color:var(--color-warning);"></i>Your profile name is not set. Please go to your <a href="portfolio.html" style="color:var(--color-accent); text-decoration:underline;">portfolio</a> and complete your profile first.'; }
+                    return;
+                }
+
+                var textVal = document.getElementById('reviewerText').value.trim();
+                var ratingEl = document.querySelector('input[name="rating"]:checked');
+
+                if (!textVal || !ratingEl) {
+                    setReviewStatus('Please provide a rating and review text before submitting.', 'error');
+                    return;
+                }
+
+                reviewSubmitButton.disabled = true;
+                setReviewStatus('Submitting your review for moderation…', 'success');
+
+                try {
+                    var createResponse = await auth.client.from('reviews').insert({
+                        user_id: auth.user.id,
+                        name: nameVal,
+                        text: textVal,
+                        rating: parseInt(ratingEl.value, 10),
+                        helpful_count: 0,
+                        approved: false
+                    }).select().single();
+                    if (createResponse.error) throw createResponse.error;
+
+                    userReviews.unshift(window.InvestCoreReviews.normalizeReview(Object.assign({}, createResponse.data, {
+                        hiveId: auth.hiveId,
+                        source: 'supabase'
+                    })));
+                    var card = buildReviewCard(userReviews[0], true, 0);
+                    reviewsList.insertBefore(card, reviewsList.firstChild);
+                    updateCounter();
+                    formSuccess.textContent = '✓ Thank you! Your review has been submitted for admin approval.';
+                    formSuccess.classList.add('visible');
+                    reviewForm.reset();
+                    setReviewStatus('Your review was submitted and is awaiting approval.', 'success');
+                } catch (error) {
+                    setReviewStatus(error.message || 'Unable to submit your review.', 'error');
+                } finally {
+                    reviewSubmitButton.disabled = false;
+                }
+            });
+
+            hydrateSupabaseReviews();
+
+        })();
+    </script>
+
+    <!-- Auth state: swap Sign In to Logout if user is logged in -->
+    <script>
+    (async function() {
+        try {
+            if (!window.InvestCoreSupabase) return;
+            var auth = await window.InvestCoreSupabase.getCurrentUserAcrossHives();
+            if (auth && auth.user) {
+                // ── Zombie Session Check ──────────────────────────────────
+                // Verify the user actually has DB records. If admin deleted
+                // this user, their Supabase auth token may still be valid.
+                try {
+                    var zClient = auth.client || window.InvestCoreSupabase.getClient({ hiveId: auth.hiveId });
+                    var zCheck  = await zClient.from('user_balances')
+                        .select('user_id')
+                        .eq('user_id', auth.user.id)
+                        .maybeSingle();
+
+                    if (!zCheck.data) {
+                        var pCheck = await zClient.from('profiles')
+                            .select('user_id')
+                            .eq('user_id', auth.user.id)
+                            .maybeSingle();
+
+                        if (!pCheck.data) {
+                            console.warn('[Index] Zombie session detected — user records deleted. Forcing logout.');
+                            await window.InvestCoreSupabase.logoutAll();
+                            ['investcore_hiveId','investcore_userId','investcore_userEmail','investcore_fullName',
+                             'investcore_deviceId','investcore_lastSync','investcore_theme']
+                                .forEach(function(k) { localStorage.removeItem(k); });
+                            // Don't redirect — just treat as logged-out visitor on the index page
+                            return;
+                        }
+                    }
+                } catch(zErr) {
+                    console.warn('[Index] Zombie session check failed (non-fatal):', zErr);
+                }
+
+                // Swap nav button to Logout
+                var authItem = document.getElementById('navAuthItem');
+                if (authItem) {
+                    authItem.innerHTML = '<button class="nav-register" id="navLogoutBtn" style="cursor:pointer;border:none;font-family:inherit;font-size:var(--font-size-sm);">Logout</button>';
+                    document.getElementById('navLogoutBtn').addEventListener('click', async function() {
+                        await window.InvestCoreSupabase.logoutAll();
+                        window.location.href = 'auth.html';
+                    });
+                }
+                // Swap footer link too
+                var footerAuth = document.getElementById('footerAuthLink');
+                if (footerAuth) {
+                    footerAuth.textContent = 'Logout';
+                    footerAuth.removeAttribute('href');
+                    footerAuth.style.cursor = 'pointer';
+                    footerAuth.addEventListener('click', async function() {
+                        await window.InvestCoreSupabase.logoutAll();
+                        window.location.href = 'auth.html';
+                    });
+                }
+            }
+        } catch(e) {}
+    })();
+    </script>
+
+</body>
+</html>
